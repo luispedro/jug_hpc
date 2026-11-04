@@ -119,9 +119,7 @@ def scheduler_log_dir(spec):
     SchedulerError
         If the path cannot be written in a ``#PBS`` directive
     '''
-    if spec.logs is None:
-        raise ValueError('WorkerSpec.logs is not set')
-    path = os.path.join(spec.logs, 'scheduler')
+    path = str(spec.scheduler_logs)
     rel = os.path.relpath(path, spec.workdir)
     if not rel.startswith(os.pardir):
         path = rel

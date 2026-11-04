@@ -10,7 +10,11 @@ from pathlib import Path
 
 from .config.toml import merge
 
+#: Subdirectory of the logs directory for the scheduler's own output files
+SCHEDULER_LOGS = 'scheduler'
+
 __all__ = [
+    'SCHEDULER_LOGS',
     'WorkerSpec',
     'make_worker_spec',
 ]
@@ -73,6 +77,18 @@ class WorkerSpec:
     @property
     def is_array(self):
         return self.workers > 1
+
+    @property
+    def scheduler_logs(self):
+        '''``<logs>/scheduler``: the directory for the scheduler's own output files
+
+        They catch what a worker prints before its script redirects its output
+        to its own log (e.g. a failing setup snippet). It must exist before the
+        job is submitted (PBS does not create it).
+        '''
+        if self.logs is None:
+            raise ValueError('WorkerSpec.logs is not set')
+        return Path(self.logs) / SCHEDULER_LOGS
 
 
 def make_worker_spec(cluster, project, rc, command=(), *, workers=None):

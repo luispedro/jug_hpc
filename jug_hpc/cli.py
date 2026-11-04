@@ -37,6 +37,26 @@ def build_parser():
             'Load the jugfile and list, for every resource class, the tasks it '
             'runs (counted per task name). Tasks matched by two classes are an '
             'error (exit status 1); classes matching no task are a warning.'))
+    submit = commands.add_parser(
+        'submit',
+        help='write the worker scripts and submit them',
+        description=(
+            'Write a worker script for every resource class with tasks (in '
+            '.jug_hpc/scripts/) and submit it. With --all, every class is '
+            'submitted at once, with at most one worker per task: this suits '
+            'task graphs where the classes do not wait for each other. With '
+            '--dry-run, the scripts and the commands that would submit them '
+            'are printed instead.'))
+    mode = submit.add_mutually_exclusive_group(required=True)
+    mode.add_argument('--all', action='store_true',
+                      help='submit every class now')
+    mode.add_argument('--dry-run', action='store_true',
+                      help='write and print the scripts and submit commands, '
+                           'without submitting')
+    submit.add_argument(
+        'classes', nargs='*', metavar='CLASS',
+        help="only these classes ('default' for the default class); a class "
+             'named here is submitted even if it has no tasks')
     return parser
 
 
@@ -154,9 +174,72 @@ def cmd_check(args, start):
     return 0 if report.ok else 1
 
 
+def cmd_submit(args, start):
+    '''``jug-hpc submit --all|--dry-run``: scripts and job IDs go to stdout'''
+    from .config import (
+        PROJECT_FILE,
+        ConfigError,
+        find_project_dir,
+        load_cluster_settings,
+        load_project_settings,
+    )
+    from .jugstate import JugfileError, load_project
+    from .schedulers.base import SchedulerError, create_scheduler
+    from .state import ProjectState, StateError
+    from .submit import format_dry_run, prepare, submit_worker, write_scripts
+
+    project_dir = find_project_dir(start)
+    if project_dir is None:
+        _error(f'no {PROJECT_FILE} found in {start.absolute()} or any parent '
+               'directory')
+        return 1
+    try:
+        cluster = load_cluster_settings(project_dir)
+        project = load_project_settings(project_dir)
+        scheduler = create_scheduler(cluster)
+        state = load_project(project)
+        prep = prepare(cluster, project, state, scheduler,
+                       classes=args.classes or None)
+        for warning in prep.warnings:
+            _message('warning', warning)
+        for note in prep.notes:
+            _message('note', note)
+        project_state = ProjectState(project_dir)
+        written = write_scripts(prep, scheduler, project_state)
+    except (ConfigError, SchedulerError, StateError) as e:
+        _error(e)
+        return 1
+    except JugfileError as e:
+        if e.details:
+            print(e.details.rstrip('\n'), file=sys.stderr)
+        _error(e)
+        return 1
+    if args.dry_run:
+        print(format_dry_run(written, project_dir), flush=True)
+        return 0
+    if not written:
+        _message('note', 'nothing to submit')
+        return 0
+    for i, w in enumerate(written):
+        try:
+            record = submit_worker(w, scheduler, project_state)
+        except (SchedulerError, StateError) as e:
+            _error(e)
+            rest = [x.prepared.class_name for x in written[i + 1:]]
+            if rest:
+                _message('note', f'not submitted: {", ".join(rest)}')
+            return 1
+        workers = record.workers
+        print(f'{record.class_name}: submitted job {record.job_id} '
+              f'({workers} worker{"s" if workers != 1 else ""}, {record.script})',
+              flush=True)
+    return 0
+
+
 COMMANDS = {
     'config': cmd_config,
     'check': cmd_check,
+    'submit': cmd_submit,
 }
 
 

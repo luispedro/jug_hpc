@@ -53,6 +53,7 @@ jug_hpc/
     slurm.py     (milestone 5)
   runner.py      runs external commands; replaced by a fake in tests
   state.py       per-project record of submitted jobs (.jug_hpc/ directory)
+  submit.py      static submission (submit --all / --dry-run)
   submitter.py   the polling loop
   cli.py         jug-hpc config | check | submit | status | cancel
 ```
@@ -288,14 +289,20 @@ Notes for the remaining steps:
   format `version`; a newer one is an error. `--dry-run` writes scripts but
   records no jobs. The milestone-3 submitter lock is separate (not
   `jobs.lock`, which is held only briefly).
-- `submit` must create `logs/` and `logs/scheduler/` before `qsub` (the
-  script's `mkdir -p` is too late for PBS's own `-o`/`-e`).
-- `submit` should pass the jugfile's task names to `selector_args`, so the
-  fallback exclusion regex for the default class is checked against the
-  classifier.
-- `submit` should reject `dict_store` and `dict_store:<file>` jugdirs (they
-  can't be shared by concurrent workers); `check` should warn about them
-  (see milestone 4, step 6).
+- Static submission (`submit.py`, done; its docstring has the details):
+  `jug-hpc submit --all|--dry-run [CLASS...]` (one of the two is required
+  until the polling submitter exists). Steps: `prepare` (raises the first
+  error of `check_scheduler_settings`, rejects `dict_store` jugdirs and
+  overlapping classes, passes the task names to `selector_args`), then
+  `write_scripts` (also creates `<logs>/scheduler/`, `WorkerSpec.scheduler_logs`,
+  which PBS needs before `qsub`), then `submit_worker` per class (`--all`
+  only). Classes with no tasks are skipped and workers are capped at the
+  number of tasks, except after a `barrier()` (tasks unknown) or for classes
+  named on the command line. Tasks are counted whether finished or not.
+  Submit commands use the script path relative to the project directory, so
+  `--dry-run` prints the exact commands. A job submitted but not recorded is
+  reported with its ID. Still to do: `check` should warn about `dict_store`
+  jugdirs (see milestone 4, step 6).
 
 **Done when:** `--dry-run` output can be submitted by hand on a real PBS
 cluster and runs a one-class jugfile to completion. → **Release 0.1.**

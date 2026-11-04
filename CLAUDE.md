@@ -11,8 +11,8 @@ before making design-level changes. PLAN.md is the source of truth for what come
 
 Current state: milestone 1 (`config`, `check`) is done; milestone 2 is in progress
 (`schedulers/base.py`, `schedulers/pbs.py`, `schedulers/local.py`, `schedulers/checks.py`,
-`runner.py`, `worker.py`, `script.py`, `selection.py`, `state.py` exist; `submitter.py` and
-`jug-hpc submit` do not yet).
+`runner.py`, `worker.py`, `script.py`, `selection.py`, `state.py`, `submit.py` and
+`jug-hpc submit --all|--dry-run` exist; the polling `submitter.py` does not yet).
 
 ## Commands
 
@@ -94,6 +94,12 @@ required because TOML is read with `tomllib`; Jug is the only runtime dependency
 - **`state.py`**: `ProjectState` for the project's `.jug_hpc/` directory: kept scripts
   (`scripts/<class>-<n>.sh`) and `jobs.json` (submitted jobs, versioned format, atomic
   replace under a `jobs.lock` flock). Raises `StateError` naming the file.
+- **`submit.py`**: static submission (`submit --all`/`--dry-run`) in three steps:
+  `prepare` (pure: settings checks, classification, one `PreparedWorker` per class with
+  tasks, workers capped at the task count unless the jugfile hit a barrier),
+  `write_scripts` (saves scripts, creates `logs/scheduler/`), `submit_worker` (submit +
+  record). Submit commands name the script relative to the project dir (their cwd), so
+  `--dry-run` prints exactly what `--all` runs.
 - **`cli.py`**: argparse subcommands dispatched via the `COMMANDS` dict; command
   implementations import lazily. Listings go to stdout, `jug-hpc: error|warning|note: ...`
   to stderr. `-C DIR` sets where to start searching upward for `jug_hpc.toml`.

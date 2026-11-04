@@ -282,11 +282,9 @@ class LocalScheduler(Scheduler):
         return render_script(spec, header_lines(spec), SCRIPT_VARS)
 
     def submit_command(self, script, spec):
-        if spec.logs is None:
-            raise ValueError('WorkerSpec.logs is not set')
         return self._command(
             'submit', f'--workers={spec.workers}', f'--time={spec.time}',
-            f'--output={Path(spec.logs) / "scheduler"}', f'--name={spec.class_name}',
+            f'--output={spec.scheduler_logs}', f'--name={spec.class_name}',
             '--', str(script))
 
     def parse_submit_output(self, stdout):
