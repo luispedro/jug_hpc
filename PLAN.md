@@ -278,6 +278,16 @@ Notes for the remaining steps:
   risk). `query`/`outcome`/`cancel` are implemented, so milestone 3's
   end-to-end tests can use it. An array's outcome is its worst worker's
   (`combine_outcomes`); the PBS backend may want the same rule.
+- State (`state.py`, done; its docstring has the format): `ProjectState`
+  manages `.jug_hpc/` (created on first write, with a `.gitignore` of `*`).
+  `write_script(class, text)` saves `scripts/<class>-<n>.sh` (n per class,
+  never reused while the file exists, `O_EXCL` against races);
+  `add_job(...)` appends a `JobRecord` (job ID, class, scheduler, workers,
+  script relative to the project dir, UTC submission time) to `jobs.json`
+  under `jobs.lock`, replacing the file atomically. `jobs.json` carries a
+  format `version`; a newer one is an error. `--dry-run` writes scripts but
+  records no jobs. The milestone-3 submitter lock is separate (not
+  `jobs.lock`, which is held only briefly).
 - `submit` must create `logs/` and `logs/scheduler/` before `qsub` (the
   script's `mkdir -p` is too late for PBS's own `-o`/`-e`).
 - `submit` should pass the jugfile's task names to `selector_args`, so the
