@@ -8,8 +8,17 @@ Loading a jugfile has process-wide side effects in Jug: the global task list
 (``jug.task.alltasks``), the store (``jug.task.Task.store``), the jugfile's
 entry in ``sys.modules`` and ``sys.path``. :func:`load_jugfile` starts from
 an empty task list and restores all of these afterwards, so that it can be
-called repeatedly (by tests, and by the submitter on every poll). Modules the
-jugfile imports stay in ``sys.modules``, as they would after any import.
+called repeatedly. Modules the jugfile imports stay in ``sys.modules``, as
+they would after any import. So, on the next load in the same process, changes
+to them are not seen, and tasks they create when imported are not created
+again (and :func:`task_counts` fails, as a task then depends on a task that
+is not in the jugfile). This is why the submitter, which reloads the jugfile
+on every poll, loads it in a subprocess.
+
+:func:`task_counts` counts the tasks of a loaded jugfile in each state
+(waiting, ready, running, failed, finished) with the function behind ``jug
+status`` (``update_status`` in ``jug.subcommands.status``), so the counts are
+always the ones ``jug status`` would show.
 '''
 import contextlib
 import logging
@@ -21,12 +30,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 __all__ = [
+    'STATES',
     'JugState',
     'JugfileError',
+    'TaskCounts',
     'default_jugdir',
     'load_jugfile',
     'load_project',
+    'task_counts',
 ]
+
+#: The states of a task, as ``jug status`` names them, in dependency order
+STATES = ('waiting', 'ready', 'running', 'failed', 'finished')
 
 
 class JugfileError(Exception):
@@ -60,17 +75,70 @@ class JugState:
     hit_barrier : bool
         Whether loading stopped at a ``barrier()`` or ``bvalue()`` whose tasks
         are not all done: more tasks may appear once they are
+    hashes : tuple of bytes
+        The hash of each task (computed while loading, as hashing may need
+        the jugfile's module); empty if ``graph_error`` is set
+    dependencies : tuple of tuple of int
+        For each task, the indices (in ``tasks``) of its direct dependencies;
+        empty if ``graph_error`` is set
+    graph_error : str or None
+        Why the hashes and dependencies could not be computed (naming the
+        jugfile and the task), or None. Loading does not fail because of
+        this, since the task names are still known, but
+        :func:`task_counts` does.
     '''
     jugfile: Path
     jugdir: str
     store: object = field(repr=False)
     tasks: tuple = field(repr=False)
     hit_barrier: bool = False
+    hashes: tuple = field(default=(), repr=False)
+    dependencies: tuple = field(default=(), repr=False)
+    graph_error: str | None = None
 
     @property
     def task_names(self):
         '''One name per task (so names repeat), in definition order'''
         return tuple(t.name for t in self.tasks)
+
+
+@dataclass(frozen=True)
+class TaskCounts:
+    '''Number of tasks in each state (as ``jug status`` counts them)
+
+    Attributes
+    ----------
+    waiting : int
+        Not finished, and some dependency is not finished either
+    ready : int
+        Every dependency is finished, and no worker holds the task's lock
+    running : int
+        Locked by a worker (which may have died without releasing it)
+    failed : int
+        Marked as failed by a worker (``jug execute`` left a failed lock)
+    finished : int
+        The result is in the store
+    '''
+    waiting: int = 0
+    ready: int = 0
+    running: int = 0
+    failed: int = 0
+    finished: int = 0
+
+    def __add__(self, other):
+        if not isinstance(other, TaskCounts):
+            return NotImplemented
+        return TaskCounts(*(getattr(self, s) + getattr(other, s) for s in STATES))
+
+    @property
+    def total(self):
+        '''Number of tasks, whatever their state'''
+        return sum(getattr(self, s) for s in STATES)
+
+    @property
+    def done(self):
+        '''True if every task is finished (also when there are none)'''
+        return self.finished == self.total
 
 
 def default_jugdir(jugfile):
@@ -145,13 +213,90 @@ def load_jugfile(jugfile, jugdir=None, cwd=None):
                 f'{type(e).__name__}: {e}',
                 details) from e
         tasks = tuple(task.alltasks)
+        hashes, dependencies, graph_error = _dependency_graph(tasks, jugfile)
     return JugState(
         jugfile=jugfile,
         jugdir=jugdir,
         store=store,
         tasks=tasks,
         hit_barrier=bool(jugspace.get('__jug__hasbarrier__', False)),
+        hashes=hashes,
+        dependencies=dependencies,
+        graph_error=graph_error,
     )
+
+
+def task_counts(state):
+    '''Count the tasks of ``state`` in each state, by task name
+
+    The store is read now, so the counts are those at the time of the call,
+    not at the time ``state`` was loaded. Tasks after a barrier that was hit
+    while loading are not counted, as they are not known yet.
+
+    Parameters
+    ----------
+    state : JugState
+
+    Returns
+    -------
+    counts : dict
+        Task name -> :class:`TaskCounts`, in the order the names first appear
+
+    Raises
+    ------
+    JugfileError
+        If the dependency graph could not be built while loading (see
+        ``JugState.graph_error``)
+    '''
+    from jug.subcommands.status import unknown, update_status
+    if state.graph_error is not None:
+        raise JugfileError(state.graph_error)
+    ht = [(i, t.name, h, unknown)
+          for i, (t, h) in enumerate(zip(state.tasks, state.hashes, strict=True))]
+    deps = dict(enumerate(state.dependencies))
+    status, _ = update_status(state.store, ht, deps, {})
+    counts = {}
+    for name in dict.fromkeys(state.task_names):
+        counts[name] = TaskCounts(*(getattr(status, s).get(name, 0) for s in STATES))
+    return counts
+
+
+def _dependency_graph(tasks, jugfile):
+    '''The hash of each task and the indices of its dependencies
+
+    This must run while the jugfile is loaded: hashing a task may pickle
+    functions defined in the jugfile, which needs its module in
+    ``sys.modules``.
+
+    Returns
+    -------
+    hashes : tuple of bytes
+    dependencies : tuple of tuple of int
+    error : str or None
+        Why the graph could not be built (then ``hashes`` and
+        ``dependencies`` are empty)
+    '''
+    index = {}
+    hashes = []
+    dependencies = []
+    for i, t in enumerate(tasks):
+        try:
+            h = t.hash()
+            deps = tuple(index[d.hash()] for d in t.dependencies())
+        except KeyError:
+            return (), (), (
+                f'{jugfile}: could not build the dependency graph: task '
+                f'{t.name!r} depends on a task that is not in the jugfile (this '
+                'normally means that a task was built with a mutable argument '
+                'that was modified afterwards)')
+        except Exception as e:  # noqa: BLE001 (hashing runs arbitrary pickling code)
+            return (), (), (
+                f'{jugfile}: could not compute the hash of task {t.name!r}: '
+                f'{type(e).__name__}: {e}')
+        index[h] = i
+        hashes.append(h)
+        dependencies.append(deps)
+    return tuple(hashes), tuple(dependencies), None
 
 
 def _jugfile_traceback(e, jugfile):

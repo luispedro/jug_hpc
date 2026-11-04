@@ -19,12 +19,14 @@ from jug.utils import prepare_name_matcher, prepare_task_matcher
 
 from .config.errors import ConfigError
 from .config.project import DEFAULT_CLASS
+from .jugstate import TaskCounts
 
 __all__ = [
     'ClassOverlapError',
     'Classification',
     'Classifier',
     'classify',
+    'counts_by_class',
     'selector',
 ]
 
@@ -211,3 +213,32 @@ def classify(classifier, task_names):
         counts[c][task_name] += 1
     errors = [classifier.overlap_error(t, names) for t, names in overlaps.items()]
     return Classification(class_names, by_name, counts, overlaps, errors)
+
+
+def counts_by_class(classifier, counts):
+    '''Sum the task counts of each class
+
+    Parameters
+    ----------
+    classifier : Classifier
+    counts : dict
+        Task name -> :class:`~jug_hpc.jugstate.TaskCounts` (as returned by
+        :func:`jug_hpc.jugstate.task_counts`)
+
+    Returns
+    -------
+    by_class : dict
+        Class name -> TaskCounts. Every class has an entry (all zeros if it
+        has no tasks), in the order of the file, ``'default'`` last.
+
+    Raises
+    ------
+    ClassOverlapError
+        If a task name is matched by two or more classes
+    '''
+    by_class = {rc.name: TaskCounts() for rc in classifier.classes}
+    by_class[DEFAULT_CLASS] = TaskCounts()
+    for task_name, c in counts.items():
+        class_name = classifier.class_of(task_name)
+        by_class[class_name] += c
+    return by_class

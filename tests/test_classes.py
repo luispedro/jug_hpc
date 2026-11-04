@@ -6,9 +6,11 @@ from jug_hpc.classes import (
     Classifier,
     ClassOverlapError,
     classify,
+    counts_by_class,
     selector,
 )
 from jug_hpc.config import ConfigError, ResourceClass, load_project_settings
+from jug_hpc.jugstate import TaskCounts
 
 
 def rc(name, match=None, pattern=None):
@@ -191,3 +193,24 @@ def test_no_classes():
     r = classify(Classifier([]), ['m.f', 'm.f'])
     assert r.class_names == ('default',)
     assert r.counts == {'default': {'m.f': 2}}
+
+
+def test_counts_by_class():
+    classifier = Classifier([rc('align', match='align_*'), rc('unused', match='nothing')])
+    counts = {
+        'jugfile.align_sample': TaskCounts(ready=2, finished=1),
+        'jugfile.align_pairs': TaskCounts(running=1, failed=1),
+        'jugfile.load': TaskCounts(finished=3),
+        'jugfile.merge': TaskCounts(waiting=1),
+    }
+    by_class = counts_by_class(classifier, counts)
+    assert list(by_class) == ['align', 'unused', 'default']
+    assert by_class['align'] == TaskCounts(ready=2, running=1, failed=1, finished=1)
+    assert by_class['unused'] == TaskCounts()
+    assert by_class['default'] == TaskCounts(waiting=1, finished=3)
+
+
+def test_counts_by_class_overlap():
+    classifier = Classifier([rc('a', match='align_*'), rc('b', pattern='/sample/')])
+    with pytest.raises(ClassOverlapError):
+        counts_by_class(classifier, {'jugfile.align_sample': TaskCounts(ready=1)})

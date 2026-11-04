@@ -9,10 +9,11 @@ workers sized per *resource class* of tasks (selected by Jug task name). Early d
 read `GOALS.md` (design, principles) and `PLAN.md` (architecture, milestones, decisions)
 before making design-level changes. PLAN.md is the source of truth for what comes next.
 
-Current state: milestone 1 (`config`, `check`) is done; milestone 2 is in progress
-(`schedulers/base.py`, `schedulers/pbs.py`, `schedulers/local.py`, `schedulers/checks.py`,
-`runner.py`, `worker.py`, `script.py`, `selection.py`, `state.py`, `submit.py` and
-`jug-hpc submit --all|--dry-run` exist; the polling `submitter.py` does not yet).
+Current state: milestones 0–1 are done; milestone 2 is done in code (`schedulers/`,
+`runner.py`, `worker.py`, `script.py`, `selection.py`, `state.py`, `submit.py`,
+`jug-hpc submit --all|--dry-run`; only the manual test on a real PBS cluster is left).
+Milestone 3 has started: task counts per class (`jugstate.task_counts`,
+`classes.counts_by_class`) exist; the polling `submitter.py` does not.
 
 ## Commands
 
@@ -64,8 +65,12 @@ required because TOML is read with `tomllib`; Jug is the only runtime dependency
   class; a name matched by two classes is an error (so class order never matters).
 - **`jugstate.py` is the only module that imports Jug internals** (`jug.jug`, `jug.task`).
   `load_jugfile` resets and then restores Jug's process-wide globals (`alltasks`,
-  `Task.store`, `sys.modules`, `sys.path`) so it can be called repeatedly. Keep Jug-internal
-  access confined here.
+  `Task.store`, `sys.modules`, `sys.path`) so it can be called repeatedly. It also computes
+  task hashes and dependency indices while the jugfile module is loaded (hashing can pickle
+  jugfile functions); `task_counts` feeds them to Jug's `update_status` for per-name
+  `TaskCounts` (waiting/ready/running/failed/finished). Keep Jug-internal access confined
+  here. Modules imported by the jugfile stay cached across in-process loads, so the
+  submitter must load in a subprocess.
 - **`selection.py`**: the `jug execute` args selecting a class's tasks. The default class
   uses `--exclude-name/--exclude-pattern` when the installed Jug supports them, otherwise a
   generated negative-lookahead `--pattern` regex that is verified against the classifier.

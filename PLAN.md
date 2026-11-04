@@ -322,11 +322,22 @@ cluster and runs a one-class jugfile to completion. → **Release 0.1.**
 1. `jugstate.py`: per-class counts of ready/running/waiting/failed tasks
    (through the Jug API from "Changes needed in Jug", or the internal
    functions until it exists). Reload the jugfile on each poll, so tasks that
-   appear after a `barrier()` are seen. Note: modules the jugfile imports
-   (e.g. a `helper.py` next to it) stay cached in `sys.modules`, so changes
-   to them are not seen on reload unless loading happens in a subprocess;
-   decide which. `Task.store` is restored after loading, so use
-   `t.can_load(state.store)`.
+   appear after a `barrier()` are seen.
+   - Done: `load_jugfile` computes each task's hash and dependencies while
+     the jugfile is loaded (hashing may pickle the jugfile's functions, so it
+     can't happen afterwards); `jugstate.task_counts(state)` gives
+     `TaskCounts` per task name using Jug's `update_status` (what `jug
+     status` uses, in 2.7.0 and later), and `classes.counts_by_class` sums
+     them per class.
+   - **Decided: the submitter loads the jugfile in a subprocess** on each
+     poll. Loading in-process keeps the modules the jugfile imports in
+     `sys.modules`, so changes to them are not seen, and tasks they create
+     at import time are not created again on the next load, which breaks the
+     dependency graph (`tests/test_jugstate.py::test_tasks_from_imported_module`).
+     A subprocess also keeps the jugfile's memory and crashes out of the
+     long-running submitter. Next: a `python -m jug_hpc.jugstate`-style entry
+     point that prints the per-name counts (and `hit_barrier`) as JSON, and a
+     function that runs it and parses the output.
 2. `query()` in the PBS backend: queued/running/finished per job and array
    element, from `qstat -f -F json`.
 3. The submission rule, per class, at each poll:
