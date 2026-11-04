@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import sys
@@ -10,11 +11,15 @@ from jug_hpc.config import load_project_settings
 from jug_hpc.jugstate import (
     JugfileError,
     TaskCounts,
+    _main,
     default_jugdir,
     load_jugfile,
     load_project,
+    project_task_counts,
+    subprocess_task_counts,
     task_counts,
 )
+from jug_hpc.runner import FakeRunner
 
 JUGFILES = Path(__file__).parent / 'jugfiles'
 JUG_TEST_JUGFILES = Path(jug.__file__).parent / 'tests' / 'jugfiles'
@@ -372,3 +377,190 @@ def test_tasks_from_imported_module(project):
         assert 'could not build the dependency graph' in state.graph_error
     finally:
         sys.modules.pop('tasksmod', None)
+
+
+# Counting in a subprocess
+
+def test_subprocess_task_counts(project):
+    in_process = task_counts(load_jugfile('simple.py', cwd=project))
+    result = subprocess_task_counts('simple.py', cwd=project)
+    assert result.counts == in_process
+    assert list(result.counts) == list(in_process)
+    assert not result.hit_barrier
+    assert result.output == ''
+    run_all(load_jugfile('simple.py', cwd=project))
+    assert all(c.done for c in subprocess_task_counts('simple.py', cwd=project).counts.values())
+
+
+def test_subprocess_task_counts_barrier(project):
+    result = subprocess_task_counts('barrier.py', cwd=project)
+    assert result.hit_barrier
+    assert result.counts == {'barrier.split': TaskCounts(ready=1)}
+    run_all(load_jugfile('barrier.py', cwd=project))
+    result = subprocess_task_counts('barrier.py', cwd=project)
+    assert result.counts == {
+        'barrier.split': TaskCounts(finished=1),
+        'barrier.process': TaskCounts(ready=3),
+    }
+
+
+def test_subprocess_task_counts_repeated_with_imported_module(project):
+    # What loading in-process gets wrong (test_tasks_from_imported_module)
+    (project / 'tasksmod.py').write_text(
+        'from jug import TaskGenerator\n'
+        '@TaskGenerator\n'
+        'def base():\n'
+        '    return 1\n'
+        'b = base()\n')
+    (project / 'usesmod.py').write_text(
+        'from jug import TaskGenerator\n'
+        'from tasksmod import b\n'
+        '@TaskGenerator\n'
+        'def use(x):\n'
+        '    return x\n'
+        'use(b)\n')
+    expected = {
+        'tasksmod.base': TaskCounts(ready=1),
+        'usesmod.use': TaskCounts(waiting=1),
+    }
+    assert subprocess_task_counts('usesmod.py', cwd=project).counts == expected
+    assert subprocess_task_counts('usesmod.py', cwd=project).counts == expected
+    assert 'tasksmod' not in sys.modules
+
+
+def test_subprocess_task_counts_jugfile_output(project):
+    (project / 'noisy.py').write_text(
+        'import sys\n'
+        'from jug import TaskGenerator\n'
+        "print('hello from stdout')\n"
+        "print('hello from stderr', file=sys.stderr)\n"
+        '@TaskGenerator\n'
+        'def f(x):\n'
+        '    return x\n'
+        'f(1)\n')
+    result = subprocess_task_counts('noisy.py', cwd=project)
+    assert result.counts == {'noisy.f': TaskCounts(ready=1)}
+    assert 'hello from stdout' in result.output
+    assert 'hello from stderr' in result.output
+
+
+def test_subprocess_task_counts_error(project):
+    with pytest.raises(JugfileError) as e:
+        subprocess_task_counts('failing.py', cwd=project)
+    assert str(e.value) == (f'{project / "failing.py"}: error while loading the jugfile: '
+                            'RuntimeError: broken jugfile')
+    assert e.value.details.startswith('Traceback')
+    assert "raise RuntimeError('broken jugfile')" in e.value.details
+
+
+def test_subprocess_task_counts_missing(project):
+    with pytest.raises(JugfileError, match='jugfile not found'):
+        subprocess_task_counts('missing.py', cwd=project)
+
+
+def test_subprocess_task_counts_graph_error(project):
+    (project / 'unhashable.py').write_text(
+        'import threading\n'
+        'from jug import TaskGenerator\n'
+        '@TaskGenerator\n'
+        'def f(x):\n'
+        '    return 1\n'
+        'f(threading.Lock())\n')
+    with pytest.raises(JugfileError, match="could not compute the hash of task 'unhashable.f'"):
+        subprocess_task_counts('unhashable.py', cwd=project)
+
+
+def test_subprocess_task_counts_crash(project):
+    (project / 'crash.py').write_text(
+        'import os, sys\n'
+        "print('about to crash', file=sys.stderr, flush=True)\n"
+        'os._exit(3)\n')
+    with pytest.raises(JugfileError) as e:
+        subprocess_task_counts('crash.py', cwd=project)
+    assert str(e.value) == (f'{project / "crash.py"}: could not load the jugfile in a '
+                            'subprocess: exit status 3')
+    assert 'about to crash' in e.value.details
+    (project / 'crash.py').write_text('import os\nos._exit(0)\n')
+    with pytest.raises(JugfileError, match='subprocess: unexpected output$'):
+        subprocess_task_counts('crash.py', cwd=project)
+
+
+def test_project_task_counts(project):
+    (project / 'jug_hpc.toml').write_text(
+        'jugfile = "simple.py"\njugdir = "store"\n'
+        '[default]\nmemory = "1G"\ntime = "1:00:00"\n')
+    settings = load_project_settings(project)
+    run_all(load_project(settings))
+    assert (project / 'store').is_dir()
+    assert not (project / 'simple.jugdata').exists()
+    counts = project_task_counts(settings).counts
+    assert counts['simple.merge'] == TaskCounts(finished=1)
+
+
+def test_subprocess_command(tmp_path):
+    runner = FakeRunner().on(sys.executable, stdout=json.dumps(
+        {'format': 1, 'hit_barrier': True,
+         'counts': [['j.f', {'waiting': 1, 'ready': 2, 'running': 3, 'failed': 4,
+                             'finished': 5}]]}), stderr='log\n')
+    result = subprocess_task_counts('j.py', 'redis://host', cwd=tmp_path, runner=runner,
+                                    timeout=30)
+    assert result.counts == {'j.f': TaskCounts(1, 2, 3, 4, 5)}
+    assert result.hit_barrier
+    assert result.output == 'log\n'
+    [call] = runner.calls
+    assert call.argv == (sys.executable, '-P', '-m', 'jug_hpc.jugstate', 'counts',
+                         '--jugdir=redis://host', str(tmp_path / 'j.py'))
+    assert call.cwd == tmp_path
+    subprocess_task_counts('j.py', cwd=tmp_path, runner=runner)
+    assert runner.calls[1].argv[-2:] == ('counts', str(tmp_path / 'j.py'))
+
+
+@pytest.mark.parametrize('stdout', [
+    '',
+    'not json',
+    '[]',
+    '{"format": 2, "hit_barrier": false, "counts": []}',
+    '{"format": 1, "counts": []}',
+    '{"format": 1, "hit_barrier": 0, "counts": []}',
+    '{"format": 1, "hit_barrier": false, "counts": [["f", {"ready": 1}]]}',
+    '{"format": 1, "hit_barrier": false, "counts": [["f"]]}',
+    ('{"format": 1, "hit_barrier": false, "counts": [[1, {"waiting": 0, "ready": 1, '
+    '"running": 0, "failed": 0, "finished": 0}]]}'),
+    ('{"format": 1, "hit_barrier": false, "counts": [["f", {"waiting": 0, "ready": 1.5, '
+    '"running": 0, "failed": 0, "finished": 0}]]}'),
+])
+def test_subprocess_unexpected_output(tmp_path, stdout):
+    runner = FakeRunner().on(sys.executable, stdout=stdout, stderr='oops')
+    with pytest.raises(JugfileError, match='subprocess: unexpected output$') as e:
+        subprocess_task_counts('j.py', cwd=tmp_path, runner=runner)
+    assert e.value.details == 'oops'
+
+
+def test_subprocess_reported_error_wins_over_exit_status(tmp_path):
+    runner = FakeRunner().on(sys.executable, returncode=1, stdout=json.dumps(
+        {'format': 1, 'error': 'j.py: broken', 'details': 'Traceback ...'}))
+    with pytest.raises(JugfileError, match='^j.py: broken$') as e:
+        subprocess_task_counts('j.py', cwd=tmp_path, runner=runner)
+    assert e.value.details == 'Traceback ...'
+
+
+def test_subprocess_timeout(tmp_path):
+    from jug_hpc.runner import CommandError
+
+    def timeout(call):
+        raise CommandError(call.argv, None, stderr='partial', reason='timed out after 5 seconds')
+    runner = FakeRunner().on(sys.executable, handler=timeout)
+    with pytest.raises(JugfileError, match='subprocess: timed out after 5 seconds$') as e:
+        subprocess_task_counts('j.py', cwd=tmp_path, runner=runner, timeout=5)
+    assert e.value.details == 'partial'
+
+
+def test_main_in_process(project, capfd, monkeypatch):
+    # _main redirects file descriptor 1, so check it with capfd
+    monkeypatch.chdir(project)
+    assert _main(['counts', 'simple.py']) == 0
+    out, _ = capfd.readouterr()
+    data = json.loads(out)
+    assert data['format'] == 1
+    assert [name for name, _ in data['counts']] == [
+        'simple.load', 'simple.align_sample', 'simple.merge']

@@ -13,14 +13,19 @@ they would after any import. So, on the next load in the same process, changes
 to them are not seen, and tasks they create when imported are not created
 again (and :func:`task_counts` fails, as a task then depends on a task that
 is not in the jugfile). This is why the submitter, which reloads the jugfile
-on every poll, loads it in a subprocess.
+on every poll, loads it in a subprocess, with :func:`subprocess_task_counts`
+(or :func:`project_task_counts`). That runs ``python -m jug_hpc.jugstate
+counts``, which loads the jugfile, counts its tasks and prints the counts as
+JSON (see :func:`_main` for the format).
 
 :func:`task_counts` counts the tasks of a loaded jugfile in each state
 (waiting, ready, running, failed, finished) with the function behind ``jug
 status`` (``update_status`` in ``jug.subcommands.status``), so the counts are
 always the ones ``jug status`` would show.
 '''
+import argparse
 import contextlib
+import json
 import logging
 import os
 import sys
@@ -33,12 +38,19 @@ __all__ = [
     'STATES',
     'JugState',
     'JugfileError',
+    'SubprocessCounts',
     'TaskCounts',
     'default_jugdir',
     'load_jugfile',
     'load_project',
+    'project_task_counts',
+    'subprocess_task_counts',
     'task_counts',
 ]
+
+#: Version of the JSON printed by ``python -m jug_hpc.jugstate counts``
+_COUNTS_FORMAT = 1
+_MODULE = 'jug_hpc.jugstate'
 
 #: The states of a task, as ``jug status`` names them, in dependency order
 STATES = ('waiting', 'ready', 'running', 'failed', 'finished')
@@ -139,6 +151,26 @@ class TaskCounts:
     def done(self):
         '''True if every task is finished (also when there are none)'''
         return self.finished == self.total
+
+
+@dataclass(frozen=True)
+class SubprocessCounts:
+    '''Task counts of a jugfile loaded in a subprocess
+
+    Attributes
+    ----------
+    counts : dict
+        Task name -> :class:`TaskCounts`, as returned by :func:`task_counts`
+    hit_barrier : bool
+        As in :class:`JugState`: more tasks may appear once the tasks before
+        the barrier are done
+    output : str
+        What the subprocess wrote while loading the jugfile (the jugfile's
+        own output to stdout and stderr, Jug's log messages); usually empty
+    '''
+    counts: dict
+    hit_barrier: bool = False
+    output: str = ''
 
 
 def default_jugdir(jugfile):
@@ -261,6 +293,123 @@ def task_counts(state):
     return counts
 
 
+def project_task_counts(settings, *, runner=None, timeout=None):
+    '''Count the tasks of a project (a ``ProjectSettings``) in a subprocess
+
+    See :func:`subprocess_task_counts`; the jugfile is run from the project
+    directory, as the workers will.
+    '''
+    return subprocess_task_counts(settings.jugfile, settings.jugdir,
+                                  cwd=settings.project_dir, runner=runner, timeout=timeout)
+
+
+def subprocess_task_counts(jugfile, jugdir=None, cwd=None, *, runner=None, timeout=None):
+    '''Load ``jugfile`` in a new Python process and count its tasks
+
+    Unlike :func:`load_jugfile` followed by :func:`task_counts`, this sees
+    changes to the modules the jugfile imports, and creates again the tasks
+    they create when imported, so it can be called repeatedly (see the module
+    docstring). The jugfile's memory use and crashes also stay in the
+    subprocess.
+
+    Parameters
+    ----------
+    jugfile, jugdir, cwd
+        As for :func:`load_jugfile`
+    runner : Runner, optional
+        Runs the subprocess (default: a ``SubprocessRunner``)
+    timeout : float, optional
+        Seconds to wait for the subprocess (default: no limit)
+
+    Returns
+    -------
+    SubprocessCounts
+
+    Raises
+    ------
+    JugfileError
+        If the jugfile could not be loaded or its tasks counted (the message
+        is the one :func:`load_jugfile` or :func:`task_counts` would give), or
+        if the subprocess failed in any other way (then ``details`` holds
+        what it wrote to stderr)
+    '''
+    from .runner import CommandError, SubprocessRunner
+    if runner is None:
+        runner = SubprocessRunner()
+    cwd = Path.cwd() if cwd is None else Path(cwd).absolute()
+    jugfile = cwd / jugfile
+    argv = _counts_command(jugfile, jugdir, cwd)
+    try:
+        result = runner.run(argv, cwd=cwd, check=False, timeout=timeout)
+    except CommandError as e:
+        raise JugfileError(
+            f'{jugfile}: could not load the jugfile in a subprocess: {e.reason}',
+            e.stderr) from e
+    return _parse_counts_output(jugfile, result.returncode, result.stdout, result.stderr)
+
+
+def _counts_command(jugfile, jugdir, cwd):
+    '''The command run by :func:`subprocess_task_counts`
+
+    ``-P`` keeps the current directory (the project directory) out of
+    ``sys.path`` while ``jug_hpc`` is imported; Jug adds the jugfile's
+    directory itself, as ``jug execute`` does. The environment (including
+    ``PYTHONPATH``) is inherited, again as the workers inherit it.
+    '''
+    argv = [sys.executable, '-P', '-m', _MODULE, 'counts']
+    if jugdir is not None:
+        # A Path is relative to cwd, and a str is passed as is: in both cases,
+        # the subprocess (which runs in cwd) gets the same jugdir as a str
+        argv.append(f'--jugdir={jugdir}')
+    argv.append(str(jugfile))
+    return argv
+
+
+def _parse_counts_output(jugfile, returncode, stdout, stderr):
+    '''Turn the output of ``python -m jug_hpc.jugstate counts`` into counts
+
+    Returns
+    -------
+    SubprocessCounts
+
+    Raises
+    ------
+    JugfileError
+        If the subprocess reported an error, or its output is not what
+        :func:`_main` prints
+    '''
+    def failed(reason):
+        return JugfileError(
+            f'{jugfile}: could not load the jugfile in a subprocess: {reason}', stderr)
+
+    try:
+        data = json.loads(stdout)
+    except ValueError:
+        data = None
+    if not isinstance(data, dict) or data.get('format') != _COUNTS_FORMAT:
+        if returncode != 0:
+            raise failed(f'exit status {returncode}')
+        raise failed('unexpected output')
+    if 'error' in data:
+        details = data.get('details', '')
+        raise JugfileError(str(data['error']), details if isinstance(details, str) else '')
+    if returncode != 0:
+        raise failed(f'exit status {returncode}')
+    try:
+        counts = {}
+        for name, by_state in data['counts']:
+            if not isinstance(name, str) or set(by_state) != set(STATES) or not all(
+                    type(by_state[s]) is int for s in STATES):
+                raise ValueError(name)
+            counts[name] = TaskCounts(**by_state)
+        hit_barrier = data['hit_barrier']
+        if type(hit_barrier) is not bool:
+            raise ValueError(hit_barrier)
+    except (KeyError, TypeError, ValueError):
+        raise failed('unexpected output') from None
+    return SubprocessCounts(counts, hit_barrier, stderr)
+
+
 def _dependency_graph(tasks, jugfile):
     '''The hash of each task and the indices of its dependencies
 
@@ -354,3 +503,70 @@ def _isolated(cwd, jugfile):
         task.Task.store = saved['store']
         task.alltasks[:] = saved['alltasks']
         root.removeFilter(log_filter)
+
+
+def _main(argv=None):
+    '''``python -m jug_hpc.jugstate counts [--jugdir=JUGDIR] JUGFILE``
+
+    Loads the jugfile (from the current directory) and prints one JSON
+    object to stdout. On success (exit status 0)::
+
+        {"format": 1, "hit_barrier": false,
+         "counts": [["jugfile.f", {"waiting": 0, "ready": 2, ...}], ...]}
+
+    with one ``[name, counts]`` pair per task name, in the order the names
+    first appear. If the jugfile cannot be loaded or its tasks counted (exit
+    status 1)::
+
+        {"format": 1, "error": "<message>", "details": "<traceback>"}
+
+    Anything the jugfile writes to stdout goes to stderr instead, so that
+    stdout holds only the JSON.
+    '''
+    parser = argparse.ArgumentParser(
+        prog=f'python -m {_MODULE}',
+        description="Load a jugfile and print its task counts as JSON (used by jug-hpc's "
+                    'submitter)')
+    commands = parser.add_subparsers(dest='command', required=True)
+    sub = commands.add_parser('counts', help='count the tasks in each state, by name')
+    sub.add_argument('--jugdir', help="the jugdir (default: Jug's default)")
+    sub.add_argument('jugfile')
+    args = parser.parse_args(argv)
+
+    with _stdout_to_stderr():
+        try:
+            state = load_jugfile(args.jugfile, args.jugdir)
+            counts = task_counts(state)
+        except JugfileError as e:
+            result = {'format': _COUNTS_FORMAT, 'error': str(e), 'details': e.details}
+            status = 1
+        else:
+            result = {
+                'format': _COUNTS_FORMAT,
+                'hit_barrier': state.hit_barrier,
+                'counts': [[name, {s: getattr(c, s) for s in STATES}]
+                           for name, c in counts.items()],
+            }
+            status = 0
+    json.dump(result, sys.stdout)
+    sys.stdout.write('\n')
+    sys.stdout.flush()
+    return status
+
+
+@contextlib.contextmanager
+def _stdout_to_stderr():
+    '''Send whatever is written to stdout (also by C code) to stderr instead'''
+    sys.stdout.flush()
+    saved = os.dup(1)
+    try:
+        os.dup2(2, 1)
+        yield
+    finally:
+        sys.stdout.flush()
+        os.dup2(saved, 1)
+        os.close(saved)
+
+
+if __name__ == '__main__':
+    sys.exit(_main())

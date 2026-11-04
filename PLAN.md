@@ -335,9 +335,12 @@ cluster and runs a one-class jugfile to completion. → **Release 0.1.**
      at import time are not created again on the next load, which breaks the
      dependency graph (`tests/test_jugstate.py::test_tasks_from_imported_module`).
      A subprocess also keeps the jugfile's memory and crashes out of the
-     long-running submitter. Next: a `python -m jug_hpc.jugstate`-style entry
-     point that prints the per-name counts (and `hit_barrier`) as JSON, and a
-     function that runs it and parses the output.
+     long-running submitter. Done: `python -m jug_hpc.jugstate counts
+     [--jugdir=J] JUGFILE` prints the per-name counts and `hit_barrier` as
+     versioned JSON (the jugfile's own stdout goes to stderr), and
+     `jugstate.subprocess_task_counts` / `project_task_counts` run it through
+     a `Runner` and raise `JugfileError` with the same messages as in-process
+     loading.
 2. `query()` in the PBS backend: queued/running/finished per job and array
    element, from `qstat -f -F json`.
 3. The submission rule, per class, at each poll:
