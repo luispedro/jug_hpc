@@ -102,58 +102,21 @@ the log path template, and the command line. Backends are found through the
 separate package without changing jug_hpc.
 
 The worker script body is the same for every scheduler and is produced by a
-shared template; a backend adds only its directive header and the names of its
-environment variables (job ID, array index, allocated CPUs):
-
-```sh
-#!/bin/bash
-#PBS ...                                  # backend-specific header
-set -e                                    # not -u: conda/module scripts use unset vars
-cd -- <workdir>
-JUG_HPC_JOB_ID="<backend expression>"
-mkdir -p -- <logs>
-exec >><logs>/<class>-"$JUG_HPC_JOB_ID".log 2>&1   # append, written live
-export JUG_HPC_CLASS=<class> JUG_HPC_JOB_ID JUG_HPC_CPUS=<cpus> OMP_NUM_THREADS=<cpus>
-<cluster setup>                           # after the CPU variables: may override them
-<project setup>
-unset JUG_MAX_HOURS JUG_MAX_MINUTES       # after setup: nothing changes the limit
-export JUG_MAX_SECONDS=<floor(time_fraction * time)>
-exec jug execute --keep-failed --name=<selector> --nr-wait-cycles=15 \
-     --wait-cycle-time=12 --jugdir=<jugdir> -- <jugfile>
-```
-
-(As implemented in `script.py`, whose docstring explains the choices. The
-jugdir is always passed explicitly because Jug's jugrc files are ignored.)
-
-The worker redirects its own output so that log names are the same on every
-scheduler and logs are readable while the job runs (PBS otherwise spools
-output until the job ends). The scheduler's own output files go to
-`logs/scheduler/` to catch failures before the redirect (e.g. a bad `setup`).
-
-Workers use few wait cycles (a few minutes in total, not Jug's default of
-30 minutes). The submitter only starts workers when tasks are ready, so a
-worker that finds nothing to do should exit quickly rather than hold its
-allocation.
-
-Workers run `jug execute --keep-failed`. Without it, Jug releases a failed
-task's lock and the task is ready again, so the submitter would submit
-workers for it forever and never see a failed task. With it, failed tasks
-stay failed until `jug cleanup --failed-only`.
+shared template (`script.py`, whose docstring explains the choices); a backend
+adds only its directive header and the shell expressions for its job ID and
+array index. The user documentation shows a rendered script and explains it
+line by line (`docs/submitting.md`, "The worker script": log redirection,
+`logs/scheduler/`, short wait cycles, `--keep-failed`, the order of the CPU
+variables, setup and `JUG_MAX_SECONDS`).
 
 ### PBS specifics
 
-- Resources: `-l select=1:ncpus=<cpus>:mem=<mem>`, `-l walltime=HH:MM:SS`,
-  `-q <partition>`, `-A <account>`, `-N jug-<class>-<project>`.
-- Workers > 1: one array job, `-J 1-<n>`, index in `PBS_ARRAY_INDEX`.
-  Workers = 1: a plain job (some PBS installations reject single-element
-  arrays; to be checked).
-- Memory is rendered in PBS units (`kb`/`mb`/`gb`), e.g. `16G` → `16gb`.
-- Raw options (`[pbs]` in cluster.toml, `[class.<name>.pbs]` in jug_hpc.toml)
-  have three sub-keys, because PBS options don't map to one flat namespace:
-  - `select`: extra chunk resources, appended to the `select` statement
-    (e.g. `ngpus = 1`);
-  - `resources`: extra job-wide `-l` resources (e.g. `place = "scatter"`);
-  - `directives`: a list of raw `#PBS` lines, passed through verbatim.
+The job header, arrays, memory units and the three raw-option keys
+(`select`, `resources`, `directives`) are documented for users in
+`docs/schedulers.md`, and in full in `pbs.py`'s docstring. For development:
+
+- Workers = 1 is a plain job, as some PBS installations reject single-element
+  arrays; to be checked on a real cluster.
 - Queue state: `qstat -f -F json -x JOB...`. Torque's `qstat` is different;
   Torque support is out of scope for 1.0 but must be possible as a separate
   backend.
@@ -305,6 +268,13 @@ dependencies. → **Release 0.2.**
 7. When the submitter stops because of failed tasks, cancel the workers left
    waiting for tasks that depend on them: each waits `NR_WAIT_CYCLES ×
    WAIT_CYCLE_TIME` (3 min) before exiting, holding its allocation.
+8. Workers that die before Jug starts (e.g. a `setup` command that fails)
+   leave the tasks ready, so the submitter submits a new job at every poll,
+   forever (seen on the local backend with `module load` in `setup` and no
+   `module` command: exit status 127, a new 10-worker array every poll).
+   With step 3, stop (or back off) when a class's recent jobs all ended
+   with an error without any task of the class finishing, and point at
+   `logs/scheduler/`. Documented as a limitation in `docs/submitting.md`.
 
 **Done when:** a test jugfile with a task that exceeds its memory and one that
 exceeds its wall time produces a correct per-class report on PBS. →
@@ -319,10 +289,16 @@ exceeds its wall time produces a correct per-class report on PBS. →
    entry point), using PBS and SLURM as examples.
 3. Jug changes released, minimum Jug version raised, internal-function
    fallbacks removed.
-4. User documentation: tutorial, configuration reference (generated from the
-   schema), the dry-run workflow, FAQ (CPU propagation, choosing
-   `time_fraction`, `file_keepalive`). Until then, the README could get a
-   short section on `config`/`check`/`submit` and the two TOML files.
+4. User documentation, in `docs/` (Sphinx + MyST Markdown, set up like Jug's,
+   built on Read the Docs by `.readthedocs.yaml`). Started: tutorial,
+   concepts, configuration reference, submitting (the polling submitter,
+   `--all`/`--dry-run`/`--as-job`, the worker script), schedulers (PBS,
+   local), FAQ (CPU propagation, choosing `time_fraction`, `file_keepalive`).
+   Left: generate the key tables of the configuration reference from
+   `CLASS_KEYS`/`PROJECT_KEYS`/... so they can't drift; `status`/`cancel`
+   when they exist; SLURM; how to write a backend (step 2); set up the Read
+   the Docs project. Keep the "Current limitations" section of
+   `docs/submitting.md` in step with what is implemented.
 5. Check the success criteria from GOALS.md on a real PBS cluster and a real
    SLURM cluster.
 

@@ -29,11 +29,13 @@ uv run pytest                             # all tests
 uv run pytest tests/test_script.py::test_name   # a single test
 uv run ruff check .                       # lint (line length 100)
 uv run jug-hpc --help                     # CLI (also: python -m jug_hpc)
+uv run --with-requirements docs/requirements.txt sphinx-build -W docs docs/_build/html  # docs
 ```
 
-CI (`.github/workflows/test.yml`) runs `uv sync --locked`, ruff, pytest on Python 3.11–3.15,
-and `jug-hpc --version`. Keep `uv.lock` in sync when changing dependencies. Python ≥ 3.11 is
-required because TOML is read with `tomllib`; Jug is the only runtime dependency.
+CI (`.github/workflows/test.yml`) runs `uv sync --locked`, ruff, the docs build (`-W`), pytest
+on Python 3.11–3.15, and `jug-hpc --version`. Keep `uv.lock` in sync when changing
+dependencies. Python ≥ 3.11 is required because TOML is read with `tomllib`; Jug is the only
+runtime dependency.
 
 - Dev tools (pytest, ruff, hypothesis) are in `[dependency-groups] dev`, so plain `uv sync`
   installs them. The locked ruff also enforces import sorting (I001) and sorted `__all__`
@@ -43,6 +45,12 @@ required because TOML is read with `tomllib`; Jug is the only runtime dependency
   `--exclude-*` one) is skipped with released Jug; run it with
   `uv run --isolated --with ../jug pytest`. Jug's examples (`../jug/examples`) are useful
   for trying `check` by hand (they need `--with numpy --with requests`).
+
+User documentation lives in `docs/` (Sphinx + MyST Markdown, like `../jug/docs`; Read the
+Docs builds it with `.readthedocs.yaml`, failing on warnings). When behaviour that users see
+changes (keys, defaults, CLI options, script contents, messages quoted there, limitations),
+update the docs in the same commit. Example output in the docs comes from real runs, with
+paths replaced by `/home/me/rnaseq`.
 
 ## Design principles that constrain code
 

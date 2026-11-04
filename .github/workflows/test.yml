@@ -18,6 +18,21 @@ jobs:
         uv sync --locked
         uv run ruff check .
 
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - name: Install uv
+      uses: astral-sh/setup-uv@v10.1.0
+      with:
+        version: ""
+        enable-cache: true
+        cache-dependency-glob: "uv.lock"
+    - name: Build the documentation (warnings are errors, as on Read the Docs)
+      run: |
+        uv sync --locked
+        uv run --with-requirements docs/requirements.txt sphinx-build -W docs docs/_build/html
+
   test:
     runs-on: ubuntu-latest
     strategy:
