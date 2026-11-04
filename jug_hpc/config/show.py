@@ -7,7 +7,7 @@ Values that are not set are shown as comments.
 from pathlib import Path
 
 from ..units import format_dhms, format_memory
-from .project import CLASS_KEYS, DEFAULT_CLASS
+from .project import CLASS_KEYS, DEFAULT_CLASS, split_jugdir
 from .toml import format_key, format_value, iter_leaves
 
 __all__ = [
@@ -70,6 +70,10 @@ def format_project_settings(project, cluster=None):
     ]:
         if isinstance(value, Path):
             value = _relative_path(value, project.project_dir)
+        elif k == 'jugdir' and value is not None:
+            prefix, path = split_jugdir(value)
+            if path is not None:
+                value = prefix + _relative_path(Path(path), project.project_dir)
         if k in data:
             entries.append((f'{k} = {format_value(value, multiline=True)}', None))
         elif k == 'jugdir':

@@ -21,6 +21,7 @@ from .project import (
     ResourceClass,
     find_project_dir,
     load_project_settings,
+    split_jugdir,
 )
 
 __all__ = [
@@ -38,5 +39,6 @@ __all__ = [
     'find_project_dir',
     'load_cluster_settings',
     'load_project_settings',
+    'split_jugdir',
     'user_cluster_path',
 ]

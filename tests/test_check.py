@@ -106,3 +106,16 @@ def test_count_column_is_aligned(project, tmp_path):
     r = project('many.py')
     assert r.text.splitlines()[-2:] == ['  12  many.f', '   1  many.g']
 
+
+
+@pytest.mark.parametrize('jugdir', ['dict_store', 'file_keepalive:store'])
+def test_jugdir_backend(tmp_path, jugdir):
+    shutil.copytree(JUGFILES, tmp_path, dirs_exist_ok=True)
+    (tmp_path / 'jug_hpc.toml').write_text(
+        f'jugfile = "simple.py"\njugdir = "{jugdir}"\n{DEFAULT}')
+    settings = load_project_settings(tmp_path)
+    state = load_project(settings)
+    assert state.jugdir == settings.jugdir
+    r = check(settings, state)
+    assert r.ok
+    assert r.classification.total('default') == 7

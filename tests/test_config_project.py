@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from jug_hpc.config import (
@@ -5,6 +7,7 @@ from jug_hpc.config import (
     ProjectSettings,
     ResourceClass,
     load_project_settings,
+    split_jugdir,
 )
 
 GOALS_EXAMPLE = '''
@@ -415,6 +418,55 @@ def test_class_named_default_rejected(tmp_path):
 def test_invalid_class_names(tmp_path, name):
     msg = error(tmp_path, MINIMAL + f'[class."{name}"]\nmatch = "a"\n')
     assert 'invalid class name' in msg
+
+
+# --- jugdir backends ----------------------------------------------------------
+
+@pytest.mark.parametrize('jugdir, expected', [
+    ('store', ('', 'store')),
+    ('/abs/store', ('', '/abs/store')),
+    ('redis://localhost:6379/', ('redis:', None)),
+    ('redis:', ('redis:', None)),
+    ('dict_store', ('dict_store', None)),
+    ('dict_store:state.pkl', ('dict_store:', 'state.pkl')),
+    ('file_keepalive:store', ('file_keepalive:', 'store')),
+    ('file_keepalive:/abs', ('file_keepalive:', '/abs')),
+    # Not a backend prefix: Jug treats these as directories
+    ('dict_store_dir', ('', 'dict_store_dir')),
+    ('file_keepalive', ('', 'file_keepalive')),
+])
+def test_split_jugdir(jugdir, expected):
+    assert split_jugdir(jugdir) == expected
+
+
+def test_jugdir_plain_directory_is_a_path(tmp_path):
+    s = load(tmp_path, 'jugdir = "data/store"\n' + MINIMAL)
+    assert s.jugdir == tmp_path / 'data' / 'store'
+    s = load(tmp_path, 'jugdir = "/abs/store"\n' + MINIMAL)
+    assert s.jugdir == Path('/abs/store')
+
+
+@pytest.mark.parametrize('jugdir', ['redis://localhost:6379/', 'redis:', 'dict_store'])
+def test_jugdir_url_backends_are_kept_as_is(tmp_path, jugdir):
+    s = load(tmp_path, f'jugdir = "{jugdir}"\n' + MINIMAL)
+    assert s.jugdir == jugdir
+    assert isinstance(s.jugdir, str)
+
+
+@pytest.mark.parametrize('prefix', ['file_keepalive:', 'dict_store:'])
+def test_jugdir_path_backends_are_resolved(tmp_path, prefix):
+    s = load(tmp_path, f'jugdir = "{prefix}store"\n' + MINIMAL)
+    assert s.jugdir == f'{prefix}{tmp_path / "store"}'
+    s = load(tmp_path, f'jugdir = "{prefix} store "\n' + MINIMAL)
+    assert s.jugdir == f'{prefix}{tmp_path / "store"}'
+    s = load(tmp_path, f'jugdir = "{prefix}/abs/store"\n' + MINIMAL)
+    assert s.jugdir == f'{prefix}/abs/store'
+
+
+@pytest.mark.parametrize('prefix', ['file_keepalive:', 'dict_store:'])
+def test_jugdir_path_backend_needs_a_path(tmp_path, prefix):
+    msg = error(tmp_path, f'jugdir = "{prefix}  "\n' + MINIMAL)
+    assert f"'jugdir' needs a path after {prefix!r}" in msg
 
 
 @pytest.mark.parametrize('key', ['jugfile', 'jugdir', 'logs'])

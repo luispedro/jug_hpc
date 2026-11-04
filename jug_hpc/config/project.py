@@ -39,6 +39,7 @@ __all__ = [
     'ResourceClass',
     'find_project_dir',
     'load_project_settings',
+    'split_jugdir',
 ]
 
 PROJECT_FILE = 'jug_hpc.toml'
@@ -49,7 +50,8 @@ DEFAULT_CLASS = 'default'
 #: Scalar keys allowed at the top level of ``jug_hpc.toml``
 PROJECT_KEYS = {
     'jugfile': 'the jugfile, relative to the project directory (default: jugfile.py)',
-    'jugdir': "the jugdir, relative to the project directory (default: Jug's)",
+    'jugdir': ("the jugdir, relative to the project directory, or a Jug backend "
+               "('redis://host:port/', 'file_keepalive:<dir>'; default: Jug's)"),
     'logs': 'directory for worker logs, relative to the project directory (default: logs)',
     'setup': "shell code run by every worker after the cluster's setup",
 }
@@ -77,6 +79,39 @@ _BUILTIN_DEFAULTS = {
 }
 
 _CLASS_NAME_RE = re.compile(r'[A-Za-z0-9_-]+')
+
+#: Jug backends whose jugdir is ``<prefix><path>``: the path is resolved
+#: against the project directory, like a plain jugdir
+JUGDIR_PATH_BACKENDS = ('file_keepalive:', 'dict_store:')
+
+
+def split_jugdir(jugdir):
+    '''Split a jugdir into the Jug backend prefix and its path
+
+    Mirrors ``jug.backends.select.select``.
+
+    Parameters
+    ----------
+    jugdir : str or Path
+
+    Returns
+    -------
+    prefix : str
+        ``''`` for a plain directory (Jug's file store), else the backend
+        prefix (``'file_keepalive:'``, ``'redis:'``, ...)
+    path : str or None
+        The path part (the whole of a plain jugdir); None for a backend that
+        does not take a path (``redis:`` URLs, ``dict_store``)
+    '''
+    jugdir = str(jugdir) if isinstance(jugdir, Path) else jugdir
+    for prefix in JUGDIR_PATH_BACKENDS:
+        if jugdir.startswith(prefix):
+            return prefix, jugdir[len(prefix):]
+    if jugdir.startswith('redis:'):
+        return 'redis:', None
+    if jugdir == 'dict_store':
+        return 'dict_store', None
+    return '', jugdir
 
 
 @dataclass(frozen=True)
@@ -150,8 +185,11 @@ class ProjectSettings:
         Absolute path of the directory holding it
     jugfile : Path
         Absolute
-    jugdir : Path or None
-        Absolute; None for Jug's default
+    jugdir : Path or str or None
+        None for Jug's default; an absolute Path for a plain directory (Jug's
+        file store); a str for any other Jug backend, as passed to ``jug
+        --jugdir``, with the path of ``file_keepalive:`` and ``dict_store:``
+        made absolute (see :func:`split_jugdir`)
     logs : Path
         Absolute
     setup : str
@@ -168,7 +206,7 @@ class ProjectSettings:
     project_dir: Path
     jugfile: Path
     default: ResourceClass
-    jugdir: Path | None = None
+    jugdir: Path | str | None = None
     logs: Path | None = None
     setup: str = ''
     classes: dict = field(default_factory=dict)
@@ -295,13 +333,26 @@ class _Validator:
             path=self.path,
             project_dir=project_dir,
             jugfile=resolve('jugfile', 'jugfile.py'),
-            jugdir=resolve('jugdir', None),
+            jugdir=self.jugdir(values.get('jugdir'), project_dir),
             logs=resolve('logs', 'logs'),
             setup=values.get('setup', ''),
             default=default,
             classes=classes,
             data=data,
         )
+
+    def jugdir(self, value, project_dir):
+        if value is None:
+            return None
+        prefix, path = split_jugdir(value)
+        if not prefix:
+            return project_dir / path
+        if path is None:
+            return value
+        path = path.strip()
+        if not path:
+            raise self.error(('jugdir',), f'needs a path after {prefix!r}')
+        return prefix + str(project_dir / path)
 
     # --- classes ----------------------------------------------------------
 

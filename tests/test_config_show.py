@@ -264,6 +264,26 @@ def test_project_path_outside_project_dir(tmp_path):
     assert f'jugdir = "{tmp_path / "elsewhere"}"' in text
 
 
+@pytest.mark.parametrize('jugdir, shown', [
+    ('store', 'store'),
+    ('redis://localhost:6379/', 'redis://localhost:6379/'),
+    ('dict_store', 'dict_store'),
+    ('dict_store:state.pkl', 'dict_store:state.pkl'),
+    ('file_keepalive:data/store', 'file_keepalive:data/store'),
+    ('file_keepalive:/elsewhere/store', 'file_keepalive:/elsewhere/store'),
+])
+def test_jugdir_backends(tmp_path, jugdir, shown):
+    write(tmp_path / PROJECT_FILE,
+          f'jugdir = "{jugdir}"\n[default]\nmemory = "1G"\ntime = "1h"\n')
+    project = load_project_settings(tmp_path)
+    text = format_project_settings(project)
+    assert f'jugdir = "{shown}"' in text.splitlines()
+    # The output reads back to the same settings (relative to the new place)
+    write(tmp_path / 'copy' / PROJECT_FILE, text)
+    reloaded = format_project_settings(load_project_settings(tmp_path / 'copy'))
+    assert f'jugdir = "{shown}"' in reloaded.splitlines()
+
+
 # --- finding the project -----------------------------------------------------
 
 def test_find_project_dir(tmp_path):
