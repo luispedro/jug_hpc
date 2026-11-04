@@ -116,7 +116,8 @@ def test_project_tables(registry, files):
         PROJECT + '[default.pbs]\ndirectives = [""]\n'
                   '[class.big]\nmatch = "x"\n[class.big.pbs.select]\nmem = "1G"\n'
                   '[class.big.slurm]\nqos = "long"\n'
-                  '[class.c]\nmatch = "y"\n[class.c.pbs]\nresources = 3\n')
+                  '[class.c]\nmatch = "y"\n[class.c.pbs]\nresources = 3\n'
+                  '[submitter.pbs]\ndirectives = 1\n[submitter.slurm]\nqos = "x"\n')
     errors, warnings = messages(check_scheduler_settings(cluster, project))
     path = files.project / 'jug_hpc.toml'
     assert errors == [
@@ -125,9 +126,12 @@ def test_project_tables(registry, files):
          'use memory in jug_hpc.toml'),
         (f"{path}: [class.c.pbs]: 'resources' must be a table of PBS resources "
          '(e.g. ngpus = 1)'),
+        f"{path}: [submitter.pbs]: 'directives' must be a list of strings (qsub options)",
     ]
     assert warnings == [
         (f"{path}: [class.big.slurm] is ignored: no scheduler backend named 'slurm' is "
+         'installed (available: pbs)'),
+        (f"{path}: [submitter.slurm] is ignored: no scheduler backend named 'slurm' is "
          'installed (available: pbs)')]
 
 

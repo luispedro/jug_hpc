@@ -7,7 +7,7 @@ Values that are not set are shown as comments.
 from pathlib import Path
 
 from ..units import format_dhms, format_memory
-from .project import CLASS_KEYS, DEFAULT_CLASS, split_jugdir
+from .project import CLASS_KEYS, DEFAULT_CLASS, SUBMITTER, SUBMITTER_KEYS, split_jugdir
 from .toml import format_key, format_value, iter_leaves
 
 __all__ = [
@@ -83,7 +83,37 @@ def format_project_settings(project, cluster=None):
     text = _join(header, entries)
     for rc in [project.default, *project.classes.values()]:
         text += '\n\n' + _format_class(rc, project, cluster)
+    text += '\n\n' + _format_submitter(project, cluster)
     return text
+
+
+def _format_submitter(project, cluster):
+    s = project.submitter
+    entries = []
+    for k in SUBMITTER_KEYS:
+        value = getattr(s, k)
+        if value is None:
+            if k == 'time':
+                note = 'needed by jug-hpc submit --as-job'
+            else:
+                note = _partition_note(cluster)
+            entries.append((f'# {k}: not set ({note})', None))
+            continue
+        if k == 'memory':
+            value = format_memory(value)
+        elif k == 'time':
+            value = format_dhms(value)
+        entries.append((f'{k} = {format_value(value)}', None if k in s.origins else BUILTIN))
+    for scheduler, table in s.raw.items():
+        for key, value in iter_leaves(table, (scheduler,)):
+            entries.append((f'{format_key(key)} = {format_value(value)}', None))
+    return _join([f'[{SUBMITTER}]'], entries)
+
+
+def _partition_note(cluster):
+    if cluster is not None and cluster.partition is not None:
+        return f"uses the cluster's, {format_value(cluster.partition)}"
+    return 'uses the scheduler default'
 
 
 def _format_class(rc, project, cluster):
@@ -110,10 +140,7 @@ def _format_class(rc, project, cluster):
                 entries.append((f'{k} = {format_value(value)}', None))
             continue
         if value is None:   # partition
-            where = 'uses the scheduler default'
-            if cluster is not None and cluster.partition is not None:
-                where = f"uses the cluster's, {format_value(cluster.partition)}"
-            entries.append((f'# {k}: not set ({where})', None))
+            entries.append((f'# {k}: not set ({_partition_note(cluster)})', None))
             continue
         if k == 'memory':
             value = format_memory(value)

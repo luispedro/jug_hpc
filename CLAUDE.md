@@ -18,7 +18,8 @@ subprocess), `Scheduler.query()` for PBS and local (a `JobStatus` per job, with
 queued/running worker counts), the submission rule and exit condition (pure functions in
 `submitter.py`), and the polling loop (`poll.py`, plain `jug-hpc submit`, with a
 per-project lock), with end-to-end tests on the local backend (chain, barrier, workers
-stopped by `JUG_MAX_SECONDS`, failed task). Not yet: `--as-job`, backoff, Jug's status cache.
+stopped by `JUG_MAX_SECONDS`, failed task), and `submit --as-job` (the submitter as a job,
+sized by `[submitter]` in `jug_hpc.toml`). Not yet: backoff, Jug's status cache.
 
 ## Commands
 
@@ -62,6 +63,9 @@ required because TOML is read with `tomllib`; Jug is the only runtime dependency
   - `jug_hpc.toml` (*what* the project needs): `[default]` + `[class.<name>]` tables;
     classes inherit unset fields from `[default]`. Cluster-only keys (`scheduler`,
     `account`) are rejected here. Unknown keys are errors (with did-you-mean suggestions).
+  - `[submitter]` in `jug_hpc.toml` (`SubmitterSettings`): resources of the `--as-job`
+    submitter job; inherits nothing from `[default]`; `submitter` is a reserved class name
+    (`config.project.SUBMITTER`), used as the class name of that job everywhere.
   - Subtables named after a scheduler (`[pbs]`, `[class.x.pbs]`) are raw options passed
     through unchecked except for shape; class values win over cluster values
     (`worker._merge_raw`).
@@ -119,6 +123,9 @@ required because TOML is read with `tomllib`; Jug is the only runtime dependency
   `submit_worker`); the only state kept between polls is the set of settled job IDs.
   `run()` repeats it; first-poll errors are fatal, later `SchedulerError`/`JugfileError`
   are retried (`MAX_FAILED_POLLS`). `cli._poll` holds `ProjectState.submitter_lock()`.
+  `cli._submit_as_job` submits the loop itself as a job (`worker.make_submitter_spec`,
+  `submit.prepare_submitter`, `script.submitter_command`) after checking for an active
+  submitter job (`submitter.active_submitter_jobs`) and the lock.
 - Workers run `jug execute --keep-failed` (`script.jug_execute_command`), so failed tasks
   stay failed and the submitter can stop instead of resubmitting them forever.
 - **`cli.py`**: argparse subcommands dispatched via the `COMMANDS` dict; command

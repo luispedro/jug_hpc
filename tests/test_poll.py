@@ -648,3 +648,111 @@ def test_cli_submit_replaces_stopped_workers(tmp_path, monkeypatch, capsys):
         assert outcome.outcome is Outcome.SUCCESS, logs
     state = load_project(load_project_settings(project_dir))
     assert all(t.can_load(state.store) for t in state.tasks)
+
+
+# --- submit --as-job --------------------------------------------------------------
+
+DOUBLE = '''\
+from jug import TaskGenerator
+
+@TaskGenerator
+def double(i):
+    return 2 * i
+
+results = [double(i) for i in range(3)]
+'''
+
+AS_JOB_PROJECT = LOCAL_PROJECT + '[submitter]\ntime = "1h"\n'
+
+
+@needs_bash
+def test_cli_submit_as_job(tmp_path, monkeypatch, capsys):
+    '''The submitter runs as a job, and runs the jugfile to the end'''
+    project_dir, sched = local_project(tmp_path, monkeypatch, DOUBLE, AS_JOB_PROJECT)
+    status = main(['-C', str(project_dir), 'submit', '--as-job', '--interval=0.2'])
+    out, err = capsys.readouterr()
+    assert status == 0, err
+    assert err == ''
+    assert out == ('submitter: submitted job 1 (.jug_hpc/scripts/submitter-1.sh); '
+                   'it logs to logs/submitter-<job id>.log\n')
+    [record] = ProjectState(project_dir).jobs()
+    assert (record.job_id, record.class_name, record.workers) == ('1', 'submitter', 1)
+    script = (project_dir / '.jug_hpc' / 'scripts' / 'submitter-1.sh').read_text()
+    assert 'exec jug-hpc submit --interval=0.2\n' in script
+    assert 'JUG_MAX' not in script
+
+    # a second submitter job is refused while the first is queued or running
+    status = main(['-C', str(project_dir), 'submit', '--as-job'])
+    out, err = capsys.readouterr()
+    assert status == 1
+    assert out == ''
+    assert err == ('jug-hpc: error: a submitter job is already queued or running for '
+                   'this project (job 1); nothing submitted\n')
+
+    wait_for_jobs(sched, ['1'])
+    records = ProjectState(project_dir).jobs()
+    wait_for_jobs(sched, [r.job_id for r in records])
+    log = (project_dir / 'logs' / 'submitter-1.log').read_text()
+    assert [r.class_name for r in records] == ['submitter', 'default'], log
+    assert 'default: submitted job 2 (2 workers, .jug_hpc/scripts/default-1.sh)' in log
+    assert log.rstrip('\n').endswith('] every task is finished'), log
+    # the submitter does not count itself as a worker
+    assert 'workers queued or running: 2\n' in log
+    for outcome in sched.outcome([r.job_id for r in records]).values():
+        assert outcome.outcome is Outcome.SUCCESS, log
+    assert not (project_dir / '.jug_hpc' / 'submitter.lock').read_text()
+
+    # with every task finished, there is nothing to submit
+    status = main(['-C', str(project_dir), 'submit', '--as-job'])
+    out, err = capsys.readouterr()
+    assert status == 0, err
+    assert out.endswith('] every task is finished\n')
+    assert err == 'jug-hpc: note: no submitter job submitted\n'
+    assert len(ProjectState(project_dir).jobs()) == 2
+
+
+def test_cli_submit_as_job_needs_time(tmp_path, monkeypatch, capsys):
+    project_dir, _ = local_project(tmp_path, monkeypatch, DOUBLE)
+    status = main(['-C', str(project_dir), 'submit', '--as-job'])
+    out, err = capsys.readouterr()
+    assert status == 1
+    assert out == ''
+    assert err == (f"jug-hpc: error: {project_dir / 'jug_hpc.toml'}: [submitter] must set "
+                   "'time' for jug-hpc submit --as-job (the wall time of the submitter job, "
+                   "which runs until every task is finished, e.g. time = '7d')\n")
+    assert not ProjectState(project_dir).jobs()
+
+
+def test_cli_submit_as_job_refused_while_submitter_runs(tmp_path, monkeypatch, capsys):
+    project_dir, _ = local_project(tmp_path, monkeypatch, DOUBLE, AS_JOB_PROJECT)
+    state = ProjectState(project_dir)
+    with state.submitter_lock():
+        status = main(['-C', str(project_dir), 'submit', '--as-job'])
+    out, err = capsys.readouterr()
+    assert status == 1
+    assert out == ''
+    assert 'another jug-hpc submit is running for this project' in err
+    assert not state.jobs()
+    assert not list((project_dir / '.jug_hpc' / 'scripts').glob('*'))
+
+
+def test_cli_submit_as_job_jugfile_error(tmp_path, monkeypatch, capsys):
+    project_dir, _ = local_project(tmp_path, monkeypatch, 'raise ValueError("oops")\n',
+                                   AS_JOB_PROJECT)
+    status = main(['-C', str(project_dir), 'submit', '--as-job'])
+    out, err = capsys.readouterr()
+    assert status == 1
+    assert out == ''
+    assert 'ValueError: oops' in err
+    assert not ProjectState(project_dir).jobs()
+
+
+@pytest.mark.parametrize('argv', [
+    ['--as-job', '--all'],
+    ['--as-job', '--dry-run'],
+    ['--as-job', 'default'],
+])
+def test_cli_submit_as_job_args(argv, capsys):
+    with pytest.raises(SystemExit) as e:
+        main(['submit', *argv])
+    assert e.value.code == 2

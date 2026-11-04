@@ -6,6 +6,7 @@ from jug_hpc.config import (
     ConfigError,
     ProjectSettings,
     ResourceClass,
+    SubmitterSettings,
     load_project_settings,
     split_jugdir,
 )
@@ -478,3 +479,60 @@ def test_paths_must_be_non_empty_strings(tmp_path, key):
 def test_setup_may_be_empty_but_must_be_a_string(tmp_path):
     assert load(tmp_path, 'setup = ""\n' + MINIMAL).setup == ''
     assert 'must be a string' in error(tmp_path, 'setup = ["a"]\n' + MINIMAL)
+
+
+# --- [submitter] ------------------------------------------------------------------
+
+def test_submitter_defaults(tmp_path):
+    settings = load(tmp_path, MINIMAL)
+    assert settings.submitter == SubmitterSettings()
+    assert (settings.submitter.cpus, settings.submitter.memory) == (1, 2 * G)
+    assert settings.submitter.time is None
+    assert settings.submitter.name == 'submitter'
+
+
+def test_submitter_table(tmp_path):
+    settings = load(tmp_path, MINIMAL + '''
+[submitter]
+memory = "500M"
+time = "7d"
+partition = "long"
+
+[submitter.pbs.resources]
+place = "free"
+''')
+    s = settings.submitter
+    assert (s.cpus, s.memory, s.time, s.partition) == (1, 500 * 1024**2, 7 * 86400, 'long')
+    assert s.raw_options('pbs') == {'resources': {'place': 'free'}}
+    assert s.raw_options('slurm') == {}
+    assert s.origins == {'memory': ('submitter', 'memory'), 'time': ('submitter', 'time'),
+                         'partition': ('submitter', 'partition')}
+    # nothing is inherited from [default], nor given to it
+    assert settings.default.partition is None
+    assert settings.default.memory == 4 * G
+
+
+@pytest.mark.parametrize('text, expected', [
+    ('workers = 2', "'submitter.workers' is not a known key"),
+    ('mem = "1G"', "did you mean 'memory'?"),
+    ('cpus = 0', "'submitter.cpus' must be at least 1"),
+    ('memory = "lots"', "'submitter.memory'"),
+    ('time = true', "'submitter.time'"),
+    ('partition = ""', "'submitter.partition' must not be empty"),
+    ('account = "x"', "'submitter.account' is a cluster setting"),
+    ('time = {}', "'submitter.time' must be a value, not a table"),
+])
+def test_submitter_errors(tmp_path, text, expected):
+    with pytest.raises(ConfigError, match=expected.replace('?', r'\?')) as e:
+        load(tmp_path, MINIMAL + '[submitter]\n' + text + '\n')
+    assert str(e.value).startswith(str(tmp_path / 'jug_hpc.toml'))
+
+
+def test_submitter_must_be_a_table(tmp_path):
+    with pytest.raises(ConfigError, match="'submitter' must be a table"):
+        load(tmp_path, 'submitter = 1\n' + MINIMAL)
+
+
+def test_class_named_submitter_rejected(tmp_path):
+    with pytest.raises(ConfigError, match="'class.submitter' is not allowed: 'submitter' is"):
+        load(tmp_path, MINIMAL + '[class.submitter]\nmatch = "x"\n')

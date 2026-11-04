@@ -441,3 +441,9 @@ def test_script_runs(tmp_path, workers, jobid, index, log):
     output = (workdir / 'logs' / log).read_text()
     assert output.startswith('jug execute --name=align ')
     assert f'job=1234 index={index or ""}' in output
+
+
+def test_golden_submitter():
+    spec = replace(SPEC, class_name='submitter', cpus=1, memory=2 * 2**30, time=7 * 86400,
+                   max_seconds=None, command=('jug-hpc', 'submit', '--interval=60'))
+    golden('submitter.sh', render(spec))

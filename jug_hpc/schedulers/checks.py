@@ -1,8 +1,8 @@
 '''Checking the scheduler-specific settings against the installed backends
 
 The configuration modules check raw-options tables (``[pbs]`` in
-``cluster.toml``, ``[default.pbs]`` and ``[class.<name>.pbs]`` in
-``jug_hpc.toml``) only for being tables, as they know no scheduler. This
+``cluster.toml``, ``[default.pbs]``, ``[class.<name>.pbs]`` and
+``[submitter.pbs]`` in ``jug_hpc.toml``) only for being tables, as they know no scheduler. This
 module checks them with the backends:
 
 - the cluster's ``scheduler`` must name an installed backend (an error);
@@ -117,6 +117,7 @@ def check_scheduler_settings(cluster=None, project=None):
         tables = [(('default',), project.data.get('default', {}))]
         tables += [(('class', name), table)
                    for name, table in project.data.get('class', {}).items()]
+        tables.append((('submitter',), project.data.get('submitter', {})))
         for prefix, table in tables:
             for name, raw in table.items():
                 if not isinstance(raw, dict):

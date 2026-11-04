@@ -51,13 +51,18 @@ def build_parser():
             'once instead, with at most one worker per task, and jug-hpc '
             'exits: this suits task graphs where the classes do not wait for '
             'each other. With --dry-run, the scripts and the commands that '
-            'would submit them are printed instead.'))
+            'would submit them are printed instead. With --as-job, the '
+            'submitter itself is submitted as a job (with the resources of '
+            '[submitter] in jug_hpc.toml, which must set its wall time), '
+            'logging to logs/submitter-<job id>.log.'))
     mode = submit.add_mutually_exclusive_group()
     mode.add_argument('--all', action='store_true',
                       help='submit every class now, and exit')
     mode.add_argument('--dry-run', action='store_true',
                       help='write and print the scripts and submit commands, '
                            'without submitting')
+    mode.add_argument('--as-job', action='store_true',
+                      help='submit the submitter as a job, and exit')
     submit.add_argument(
         '--interval', type=_positive_seconds, metavar='SECONDS', default=None,
         help='seconds between polls (default: 60)')
@@ -201,7 +206,9 @@ def cmd_check(args, start):
 
 
 def cmd_submit(args, start):
-    '''``jug-hpc submit``: the polling submitter, or ``--all|--dry-run``'''
+    '''``jug-hpc submit``: the polling submitter, or ``--all|--dry-run|--as-job``'''
+    if args.as_job:
+        return _submit_as_job(args, start)
     if not (args.all or args.dry_run):
         return _poll(args, start)
     return _submit_static(args, start)
@@ -282,7 +289,6 @@ def _poll(args, start):
     from .poll import POLL_INTERVAL, Submitter, run
     from .schedulers.base import SchedulerError, create_scheduler
     from .state import ProjectState, StateError
-    from .submitter import Progress
 
     project_dir = find_project_dir(start)
     if project_dir is None:
@@ -329,18 +335,104 @@ def _poll(args, start):
     except KeyboardInterrupt:
         _message('note', 'interrupted: the workers already submitted keep running')
         return 130
-    if result.report.progress is Progress.FINISHED:
+    return _report_end(result.report)
+
+
+def _report_end(report):
+    '''Report a run that is over (finished or blocked); returns the exit status'''
+    from .submitter import Progress
+    if report.progress is Progress.FINISHED:
         _log('every task is finished')
         return 0
-    failed = ', '.join(f'{_table_label(n)} {c}' for n, c in result.report.failed.items())
+    failed = ', '.join(f'{_table_label(n)} {c}' for n, c in report.failed.items())
     message = f'no task can run: failed tasks: {failed}'
-    if result.report.waiting:
-        waiting = ', '.join(f'{_table_label(n)} {c}' for n, c in result.report.waiting.items())
+    if report.waiting:
+        waiting = ', '.join(f'{_table_label(n)} {c}' for n, c in report.waiting.items())
         message += f'; tasks waiting for them: {waiting}'
     _error(message)
     _message('note', 'the worker logs say why the tasks failed; once fixed, '
                      "'jug cleanup --failed-only' lets them run again")
     return 1
+
+
+def _submit_as_job(args, start):
+    '''``jug-hpc submit --as-job``: submit the polling submitter as a job
+
+    Everything the submitter would check at its first poll is checked here
+    first (settings, jugfile), so that mistakes are reported now rather than
+    in the job's log. Nothing is submitted if a submitter is running (the
+    lock is held) or a submitter job is queued or running, or if no task is
+    left to run.
+    '''
+    from datetime import UTC, datetime
+
+    from .classes import counts_by_class
+    from .config import (
+        PROJECT_FILE,
+        ConfigError,
+        find_project_dir,
+        load_cluster_settings,
+        load_project_settings,
+    )
+    from .jugstate import JugfileError, project_task_counts
+    from .poll import POLL_INTERVAL, Submitter
+    from .schedulers.base import SchedulerError, create_scheduler
+    from .state import ProjectState, StateError
+    from .submit import prepare_submitter, submit_worker, write_script
+    from .submitter import Progress, active_submitter_jobs, progress, submitter_jobs
+
+    project_dir = find_project_dir(start)
+    if project_dir is None:
+        _error(f'no {PROJECT_FILE} found in {start.absolute()} or any parent '
+               'directory')
+        return 1
+    interval = args.interval if args.interval is not None else POLL_INTERVAL
+    try:
+        cluster = load_cluster_settings(project_dir)
+        project = load_project_settings(project_dir)
+        scheduler = create_scheduler(cluster)
+        project_state = ProjectState(project_dir)
+        submitter = Submitter(cluster, project, scheduler, project_state)
+        for warning in submitter.warnings:
+            _message('warning', warning)
+        prepared = prepare_submitter(cluster, project, scheduler, interval=interval)
+
+        jobs = submitter_jobs(project_state.jobs(), scheduler.name)
+        statuses = scheduler.query([r.job_id for r in jobs]) if jobs else {}
+        active = active_submitter_jobs(jobs, statuses, datetime.now(UTC))
+        if active:
+            ids = ', '.join(r.job_id for r in active)
+            _error(f'a submitter job is already queued or running for this project '
+                   f'(job {ids}); nothing submitted')
+            return 1
+        with project_state.submitter_lock():
+            pass
+
+        counted = project_task_counts(project)
+        report = progress(counts_by_class(submitter.classifier, counted.counts),
+                          counted.hit_barrier)
+        if report.progress is not Progress.RUNNING:
+            _message('note', 'no submitter job submitted')
+            return _report_end(report)
+
+        written = write_script(prepared, scheduler, project_state)
+        record = submit_worker(written, scheduler, project_state)
+    except (ConfigError, SchedulerError, StateError) as e:
+        _error(e)
+        return 1
+    except JugfileError as e:
+        if e.details:
+            print(e.details.rstrip('\n'), file=sys.stderr)
+        _error(e)
+        return 1
+    logs = prepared.spec.logs
+    try:
+        logs = logs.relative_to(project_dir)
+    except ValueError:
+        pass
+    print(f'{record.class_name}: submitted job {record.job_id} ({record.script}); '
+          f'it logs to {logs}/{record.class_name}-<job id>.log', flush=True)
+    return 0
 
 
 def _table_label(name):

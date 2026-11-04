@@ -20,7 +20,14 @@ can be tested without a scheduler or a jugfile:
 - :func:`is_settled` says when a job never needs to be asked about again;
 - :func:`active_workers` counts the queued and running workers per class;
 - :func:`workers_to_submit` applies the rule above;
-- :func:`progress` says whether to keep polling (:class:`Progress`).
+- :func:`progress` says whether to keep polling (:class:`Progress`);
+- :func:`active_submitter_jobs` finds a submitter job (``jug-hpc submit
+  --as-job``) still queued or running, so that a second one is not
+  submitted.
+
+The submitter job is recorded in ``.jug_hpc/jobs.json`` like a worker, with
+the class name :data:`~jug_hpc.config.project.SUBMITTER`; the polling
+submitter does not count it (and does not query it).
 
 A job the scheduler does not know (``JobState.UNKNOWN``) has normally ended
 long ago, and its record was purged. But some schedulers take a moment to list
@@ -33,17 +40,20 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 
+from .config.project import SUBMITTER
 from .schedulers.base import JobState
 
 __all__ = [
     'SUBMIT_GRACE',
     'Progress',
     'ProgressReport',
+    'active_submitter_jobs',
     'active_workers',
     'class_limits',
     'is_settled',
     'jobs_to_query',
     'progress',
+    'submitter_jobs',
     'workers_to_submit',
 ]
 
@@ -123,11 +133,43 @@ def jobs_to_query(records, scheduler_name, settled=()):
     Returns
     -------
     records : list of JobRecord
-        In submission order
+        In submission order; without submitter jobs (``--as-job``), which
+        run no task
     '''
     settled = set(settled)
     return [r for r in records
-            if r.scheduler == scheduler_name and r.job_id not in settled]
+            if r.scheduler == scheduler_name and r.job_id not in settled
+            and r.class_name != SUBMITTER]
+
+
+def submitter_jobs(records, scheduler_name):
+    '''The recorded submitter jobs (``--as-job``) of backend ``scheduler_name``'''
+    return [r for r in records
+            if r.scheduler == scheduler_name and r.class_name == SUBMITTER]
+
+
+def active_submitter_jobs(records, statuses, now, *, grace=SUBMIT_GRACE):
+    '''The submitter jobs that are queued or running
+
+    Parameters
+    ----------
+    records : sequence of JobRecord
+        The submitter jobs (see :func:`submitter_jobs`)
+    statuses : dict
+        JobId -> JobStatus, as returned by :meth:`Scheduler.query`; a record
+        without a status is not active
+    now : datetime
+        Timezone aware
+    grace : float, optional
+        See :func:`is_settled`: an unknown job submitted less than ``grace``
+        seconds before ``now`` is active
+
+    Returns
+    -------
+    records : list of JobRecord
+    '''
+    return [r for r in records
+            if active_workers([r], statuses, now, grace=grace).get(r.class_name, 0) > 0]
 
 
 def active_workers(records, statuses, now, *, grace=SUBMIT_GRACE):

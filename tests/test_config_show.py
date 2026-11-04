@@ -311,3 +311,27 @@ def test_find_project_dir_relative(tmp_path, monkeypatch):
     (tmp_path / 'sub').mkdir()
     monkeypatch.chdir(tmp_path / 'sub')
     assert find_project_dir('.') == tmp_path
+
+
+def test_project_submitter(loaded, tmp_path):
+    project, cluster = loaded
+    submitter = section(format_project_settings(project, cluster), '[submitter]')
+    assert comment_of(submitter, 'cpus = 1') == 'built-in default'
+    assert comment_of(submitter, 'memory = "2G"') == 'built-in default'
+    assert '# time: not set (needed by jug-hpc submit --as-job)' in submitter
+    assert '# partition: not set (uses the cluster\'s, "normal")' in submitter
+
+    copy = tmp_path / 'copy'
+    write(copy / PROJECT_FILE, project.path.read_text() +
+          '[submitter]\ntime = "3d"\npartition = "long"\n[submitter.pbs]\nplace = "free"\n')
+    project = load_project_settings(copy)
+    text = format_project_settings(project, cluster)
+    submitter = section(text, '[submitter]')
+    assert comment_of(submitter, 'time = "3-00:00:00"') is None
+    assert comment_of(submitter, 'partition = "long"') is None
+    assert comment_of(submitter, 'pbs.place = "free"') is None
+    # what is shown reads back as the same settings
+    write(tmp_path / 'again' / PROJECT_FILE, text)
+    again = load_project_settings(tmp_path / 'again')
+    assert dataclasses.replace(again.submitter, origins={}) == \
+        dataclasses.replace(project.submitter, origins={})

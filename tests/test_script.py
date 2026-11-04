@@ -16,8 +16,9 @@ from jug_hpc.script import (
     log_path,
     render_body,
     render_script,
+    submitter_command,
 )
-from jug_hpc.worker import make_worker_spec
+from jug_hpc.worker import make_submitter_spec, make_worker_spec
 
 CLUSTER = '''
 scheduler = "pbs"
@@ -266,3 +267,20 @@ def test_run_script_quoting(tmp_path, settings):
     assert out['argv'] == list(nasty[1:])
     assert out['env']['JUG_HPC_CLASS'] == "c'l $x"
     assert not (spec.workdir / 'pwned').exists()
+
+
+def test_submitter_command():
+    assert submitter_command(60) == ('jug-hpc', 'submit', '--interval=60')
+    assert submitter_command(0.5, jug_hpc='/opt/bin/jug-hpc') == \
+        ('/opt/bin/jug-hpc', 'submit', '--interval=0.5')
+
+
+def test_body_submitter(tmp_path):
+    cluster, project = make_project(tmp_path, PROJECT + '[submitter]\ntime = "1d"\n')
+    spec = make_submitter_spec(cluster, project, submitter_command(60))
+    lines = render_body(spec, VARS).splitlines()
+    assert not [ln for ln in lines if 'JUG_MAX_SECONDS' in ln or 'unset' in ln]
+    assert lines[-1] == 'exec jug-hpc submit --interval=60'
+    assert 'export FROM_CLUSTER=1' in lines
+    assert any(ln.startswith('exec >>') and '/submitter-' in ln for ln in lines)
+    assert 'export JUG_HPC_CLASS=submitter JUG_HPC_JOB_ID' in lines[5]

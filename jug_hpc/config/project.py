@@ -8,10 +8,14 @@ The file lives in the project directory and has:
 - ``[class.<name>]`` tables, one per resource class. Each selects tasks with
   exactly one of ``match`` (as ``jug execute --name``) or ``pattern`` (as
   ``jug execute --pattern``) and inherits every unset field from
-  ``[default]``.
+  ``[default]``;
+- an optional ``[submitter]`` table with the resources of the submitter job
+  (``jug-hpc submit --as-job``), which inherits nothing from ``[default]``:
+  the submitter needs little memory and one CPU, but must run as long as the
+  whole run.
 
-Subtables of ``[default]`` or of a class (e.g. ``[class.merge.pbs]``) hold raw
-options for the scheduler of the same name. They are passed through to the
+Subtables of ``[default]``, of a class (e.g. ``[class.merge.pbs]``) or of
+``[submitter]`` hold raw options for the scheduler of the same name. They are passed through to the
 backend unchecked; a class's raw options are merged over those of
 ``[default]``, key by key.
 
@@ -35,8 +39,11 @@ __all__ = [
     'DEFAULT_CLASS',
     'PROJECT_FILE',
     'PROJECT_KEYS',
+    'SUBMITTER',
+    'SUBMITTER_KEYS',
     'ProjectSettings',
     'ResourceClass',
+    'SubmitterSettings',
     'find_project_dir',
     'jugdir_problem',
     'load_project_settings',
@@ -47,6 +54,11 @@ PROJECT_FILE = 'jug_hpc.toml'
 
 #: Name of the class that runs every task matched by no other class
 DEFAULT_CLASS = 'default'
+
+#: Name of the submitter job (``jug-hpc submit --as-job``), used like a class
+#: name in job names, log names, scripts and ``.jug_hpc/jobs.json``, so no
+#: class may be called this
+SUBMITTER = 'submitter'
 
 #: Scalar keys allowed at the top level of ``jug_hpc.toml``
 PROJECT_KEYS = {
@@ -68,6 +80,15 @@ CLASS_KEYS = {
     'workers': 'maximum number of workers at the same time (default: 1)',
     'time_fraction': 'JUG_MAX_SECONDS = time_fraction * time, in (0, 1] (default: 0.8)',
     'partition': "partition (PBS: queue); overrides the cluster's default",
+}
+
+#: Keys allowed in ``[submitter]``. Tables hold raw scheduler options.
+SUBMITTER_KEYS = {
+    'cpus': 'CPUs of the submitter job (default: 1)',
+    'memory': "memory of the submitter job, e.g. '2G' (default: 2G)",
+    'time': ("wall time of the submitter job, e.g. '7d': as long as the whole run; "
+             'required by `jug-hpc submit --as-job`'),
+    'partition': "partition (PBS: queue) of the submitter job; overrides the cluster's",
 }
 
 _SELECTOR_KEYS = ('match', 'pattern')
@@ -203,6 +224,42 @@ class ResourceClass:
 
 
 @dataclass(frozen=True)
+class SubmitterSettings:
+    '''Resources of the submitter job (``[submitter]``; ``jug-hpc submit --as-job``)
+
+    Attributes
+    ----------
+    cpus : int
+    memory : int
+        Bytes
+    time : int or None
+        Wall time, in seconds; None if not set (``--as-job`` then refuses to
+        run)
+    partition : str or None
+        None to use the cluster's default
+    raw : dict
+        Raw scheduler options: scheduler name -> table
+    origins : dict
+        Field name -> key tuple in ``jug_hpc.toml`` where the value was set
+        (fields not set are missing)
+    '''
+    cpus: int = 1
+    memory: int = 2 * 1024 ** 3
+    time: int | None = None
+    partition: str | None = None
+    raw: dict = field(default_factory=dict)
+    origins: dict = field(default_factory=dict)
+
+    @property
+    def name(self):
+        return SUBMITTER
+
+    def raw_options(self, scheduler):
+        '''Raw options of the submitter job for ``scheduler``'''
+        return self.raw.get(scheduler, {})
+
+
+@dataclass(frozen=True)
 class ProjectSettings:
     '''Validated project settings
 
@@ -228,6 +285,9 @@ class ProjectSettings:
     classes : dict
         Class name -> ResourceClass, in the order of the file (without the
         default class)
+    submitter : SubmitterSettings
+        The submitter job's resources (built-in defaults if there is no
+        ``[submitter]`` table)
     data : dict
         The TOML data, as read
     '''
@@ -239,6 +299,7 @@ class ProjectSettings:
     logs: Path | None = None
     setup: str = ''
     classes: dict = field(default_factory=dict)
+    submitter: SubmitterSettings = field(default_factory=SubmitterSettings)
     data: dict = field(default_factory=dict)
 
     def all_classes(self):
@@ -318,7 +379,7 @@ class _Validator:
         values = {}
         for k, v in data.items():
             key = (k,)
-            if k in ('default', 'class'):
+            if k in ('default', 'class', SUBMITTER):
                 if not isinstance(v, dict):
                     raise self.error(key, f'must be a table, not {toml_type(v)}')
                 continue
@@ -348,6 +409,10 @@ class _Validator:
                          f'not {toml_type(table)}')
             if name == DEFAULT_CLASS:
                 raise self.error(key, 'is not allowed: the default class is set in [default]')
+            if name == SUBMITTER:
+                raise self.error(
+                    key, f'is not allowed: {SUBMITTER!r} is the name of the submitter job '
+                         '(its resources are set in [submitter])')
             if not _CLASS_NAME_RE.fullmatch(name):
                 raise self.error(
                     key, 'has an invalid class name: use only letters, digits, '
@@ -367,6 +432,7 @@ class _Validator:
             setup=values.get('setup', ''),
             default=default,
             classes=classes,
+            submitter=self.submitter(data.get(SUBMITTER, {})),
             data=data,
         )
 
@@ -382,6 +448,27 @@ class _Validator:
         if not path:
             raise self.error(('jugdir',), f'needs a path after {prefix!r}')
         return prefix + str(project_dir / path)
+
+    # --- the submitter job ------------------------------------------------
+
+    def submitter(self, table):
+        values = {}
+        origins = {}
+        raw = {}
+        for k, v in table.items():
+            key = (SUBMITTER, k)
+            if isinstance(v, dict):
+                if k in SUBMITTER_KEYS:
+                    raise self.error(key, 'must be a value, not a table')
+                raw[k] = v
+                continue
+            if k in CLUSTER_ONLY_KEYS:
+                raise self.error(key, _cluster_only_message(k))
+            if k not in SUBMITTER_KEYS:
+                raise self.error(key, f'is not a known key{_suggestion(k, SUBMITTER_KEYS)}')
+            values[k] = self.value(key, k, v)
+            origins[k] = key
+        return SubmitterSettings(raw=raw, origins=origins, **values)
 
     # --- classes ----------------------------------------------------------
 

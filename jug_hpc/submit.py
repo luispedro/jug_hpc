@@ -35,11 +35,11 @@ from pathlib import Path
 
 from .classes import Classifier, classify
 from .config.errors import ConfigError
-from .config.project import jugdir_problem
+from .config.project import SUBMITTER, jugdir_problem
 from .schedulers.checks import check_scheduler_settings
-from .script import jug_execute_command
+from .script import jug_execute_command, submitter_command
 from .state import StateError
-from .worker import make_worker_spec
+from .worker import make_submitter_spec, make_worker_spec
 
 __all__ = [
     'Preparation',
@@ -49,6 +49,7 @@ __all__ = [
     'format_dry_run',
     'prepare',
     'prepare_class',
+    'prepare_submitter',
     'submit_worker',
     'write_script',
     'write_scripts',
@@ -232,6 +233,36 @@ def prepare_class(cluster, project, rc, scheduler, *, workers, tasks, task_names
     command = jug_execute_command(project, rc, jug=jug, task_names=task_names)
     spec = make_worker_spec(cluster, project, rc, command, workers=workers)
     return PreparedWorker(rc.name, tasks, spec, scheduler.render_script(spec))
+
+
+def prepare_submitter(cluster, project, scheduler, *, interval, jug_hpc='jug-hpc'):
+    '''Build the submitter job (``jug-hpc submit --as-job``)
+
+    Parameters
+    ----------
+    cluster : ClusterSettings
+    project : ProjectSettings
+    scheduler : Scheduler
+    interval : float
+        Seconds between polls
+    jug_hpc : str, optional
+        The ``jug-hpc`` executable in the script
+
+    Returns
+    -------
+    prepared : PreparedWorker
+        With ``class_name`` :data:`~jug_hpc.config.project.SUBMITTER` and no
+        tasks
+
+    Raises
+    ------
+    ConfigError
+        If ``[submitter]`` sets no ``time``
+    SchedulerError
+        If the script cannot be rendered
+    '''
+    spec = make_submitter_spec(cluster, project, submitter_command(interval, jug_hpc=jug_hpc))
+    return PreparedWorker(SUBMITTER, 0, spec, scheduler.render_script(spec))
 
 
 def write_script(prepared, scheduler, project_state):

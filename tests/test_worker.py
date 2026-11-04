@@ -1,7 +1,7 @@
 import pytest
 
 from jug_hpc.config import ConfigError, load_cluster_settings, load_project_settings
-from jug_hpc.worker import WorkerSpec, make_worker_spec
+from jug_hpc.worker import WorkerSpec, make_submitter_spec, make_worker_spec
 
 CLUSTER = '''
 scheduler = "pbs"
@@ -139,3 +139,29 @@ def test_raw_shape_conflict(tmp_path):
     assert message.startswith(str(tmp_path / 'jug_hpc.toml'))
     assert 'class.a.pbs.select' in message
     assert str(tmp_path / 'cluster.toml') in message
+
+
+def test_submitter_spec(settings):
+    cluster, project = settings
+    with pytest.raises(ConfigError, match=r"\[submitter\] must set 'time'"):
+        make_submitter_spec(cluster, project, ['jug-hpc', 'submit'])
+    (project.project_dir / 'jug_hpc.toml').write_text(
+        PROJECT + '[submitter]\ntime = "2d"\n[submitter.pbs.select]\nhost = "login"\n')
+    project = load_project_settings(project.project_dir)
+    spec = make_submitter_spec(cluster, project, ['jug-hpc', 'submit'])
+    assert spec == WorkerSpec(
+        class_name='submitter',
+        project_name='myproj',
+        workdir=project.project_dir,
+        cpus=1,
+        memory=2 * 2**30,
+        time=2 * 86400,
+        max_seconds=None,
+        partition='workq',   # the cluster's: nothing comes from [default]
+        account='grant1',
+        raw={'directives': ['-m n'], 'select': {'ngpus': 0, 'host': 'login'}},
+        setup=('module load python\n', 'source .venv/bin/activate'),
+        logs=project.project_dir / 'logs',
+        command=('jug-hpc', 'submit'),
+    )
+    assert spec.job_name == 'jug-submitter-myproj'

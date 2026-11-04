@@ -11,11 +11,13 @@ from jug_hpc.state import JobRecord
 from jug_hpc.submitter import (
     SUBMIT_GRACE,
     Progress,
+    active_submitter_jobs,
     active_workers,
     class_limits,
     is_settled,
     jobs_to_query,
     progress,
+    submitter_jobs,
     workers_to_submit,
 )
 
@@ -55,6 +57,28 @@ def test_jobs_to_query():
     assert [r.job_id for r in jobs_to_query(records, 'pbs', {'3'})] == ['1', '4']
     assert [r.job_id for r in jobs_to_query(records, 'local')] == ['2']
     assert jobs_to_query([], 'pbs') == []
+
+
+def test_submitter_jobs_are_not_queried():
+    records = [record('1', 'submitter'), record('2'), record('3', 'submitter', scheduler='local')]
+    assert [r.job_id for r in jobs_to_query(records, 'pbs')] == ['2']
+    assert [r.job_id for r in submitter_jobs(records, 'pbs')] == ['1']
+    assert [r.job_id for r in submitter_jobs(records, 'local')] == ['3']
+
+
+def test_active_submitter_jobs():
+    recent = NOW - timedelta(seconds=30)
+    records = [record(str(i), 'submitter') for i in range(1, 5)] + \
+        [record('5', 'submitter', submitted=recent), record('6', 'submitter')]
+    statuses = {
+        '1': JobStatus(JobState.FINISHED),
+        '2': JobStatus(JobState.QUEUED, queued=1),
+        '3': JobStatus(JobState.RUNNING, running=1),
+        '4': JobStatus(JobState.UNKNOWN),
+        '5': JobStatus(JobState.UNKNOWN),
+    }
+    assert [r.job_id for r in active_submitter_jobs(records, statuses, NOW)] == ['2', '3', '5']
+    assert active_submitter_jobs([], {}, NOW) == []
 
 
 # --- active_workers -------------------------------------------------------------

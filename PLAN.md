@@ -383,7 +383,7 @@ cluster and runs a one-class jugfile to completion. → **Release 0.1.**
 5. `jug-hpc submit` runs the loop in the foreground; `--as-job` submits the
    loop itself as a small, long job (1 CPU, little memory). Only one
    submitter per project is allowed (a lock in `.jug_hpc/`).
-   - Done (except `--as-job`): `poll.py` has `Submitter.poll()` (counts in a
+   - Done: `poll.py` has `Submitter.poll()` (counts in a
      subprocess, queries the jobs not yet settled, submits what
      `workers_to_submit` asks for, only while `RUNNING`) and `run()` (polls
      every `--interval` seconds, default 60, until `FINISHED` or `BLOCKED`).
@@ -392,6 +392,23 @@ cluster and runs a one-class jugfile to completion. → **Release 0.1.**
      up to 5 times in a row. The lock is an `flock` on
      `.jug_hpc/submitter.lock` (holding `pid@host`). Exit status 0 when
      finished, 1 when blocked by failed tasks.
+   - `--as-job` done: the submitter job's resources are a `[submitter]`
+     table in `jug_hpc.toml` (`cpus` 1, `memory` 2G by default; `time` has
+     no default and `--as-job` refuses to run without it; `partition`; raw
+     subtables like `[submitter.pbs]`). Nothing is inherited from
+     `[default]`, and `submitter` is reserved as a class name. Its script is
+     the worker script with `jug-hpc submit --interval=<s>` as its command
+     and no `JUG_MAX_*` lines; it logs to `logs/submitter-<job id>.log` and
+     is recorded in `jobs.json` with class `submitter` (the loop neither
+     queries nor counts it). Before submitting, `--as-job` checks the
+     settings, that no recorded submitter job is queued or running and that
+     the lock is free, and loads the jugfile once (errors are reported now,
+     not in the job's log; if nothing is left to run, nothing is submitted).
+     Open: a submitter job reaching its wall time is killed (workers keep
+     running; submit again); it could resubmit itself before then. To check
+     on a real cluster: that compute nodes may run `qsub`/`qstat`, and that
+     the job finds the same `cluster.toml` (a non-default `XDG_CONFIG_HOME`
+     is not passed to PBS jobs).
    - **Decided: workers run `jug execute --keep-failed`.** Without it, Jug
      releases a failed task's lock and the task is ready again, so the
      submitter would submit workers for it forever and never see a failed

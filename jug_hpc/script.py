@@ -15,6 +15,10 @@ body rendered here::
     export JUG_MAX_SECONDS=<max_seconds>
     exec jug execute ...
 
+The submitter job (``jug-hpc submit --as-job``) has the same script, with
+``class`` ``submitter``, no ``JUG_MAX_*`` lines, and ``exec jug-hpc submit
+--interval=<seconds>`` as its command (:func:`submitter_command`).
+
 Choices made here:
 
 - The script changes to the project directory itself (PBS starts jobs in the
@@ -51,6 +55,7 @@ __all__ = [
     'log_path',
     'render_body',
     'render_script',
+    'submitter_command',
 ]
 
 #: ``jug execute --nr-wait-cycles``: workers wait at most a few minutes for
@@ -139,6 +144,25 @@ def jug_execute_command(project, rc, *, jug='jug', exclude=None, task_names=None
     )
 
 
+def submitter_command(interval, *, jug_hpc='jug-hpc'):
+    '''The command line of the submitter job: ``jug-hpc submit --interval=<s>``
+
+    The job starts in the project directory, so no ``-C`` is needed.
+
+    Parameters
+    ----------
+    interval : float
+        Seconds between polls
+    jug_hpc : str, optional
+        The ``jug-hpc`` executable (found on ``PATH`` after the setup snippets)
+
+    Returns
+    -------
+    argv : tuple of str
+    '''
+    return (jug_hpc, 'submit', f'--interval={interval:g}')
+
+
 def log_path(spec):
     '''The worker's log file, as a shell word (quoted, with the backend's expressions)
 
@@ -157,7 +181,8 @@ def render_body(spec, variables):
     Parameters
     ----------
     spec : WorkerSpec
-        ``spec.logs`` and ``spec.command`` must be set
+        ``spec.logs`` and ``spec.command`` must be set; without
+        ``spec.max_seconds`` (the submitter job), ``JUG_MAX_*`` are not set
     variables : ScriptVars
 
     Returns
@@ -191,11 +216,12 @@ def render_body(spec, variables):
         lines += ['', snippet.strip('\n')]
     if spec.setup:
         lines.append('')
-    lines += [
-        'unset JUG_MAX_HOURS JUG_MAX_MINUTES',
-        f'export JUG_MAX_SECONDS={int(spec.max_seconds)}',
-        'exec ' + shlex.join(spec.command),
-    ]
+    if spec.max_seconds is not None:
+        lines += [
+            'unset JUG_MAX_HOURS JUG_MAX_MINUTES',
+            f'export JUG_MAX_SECONDS={int(spec.max_seconds)}',
+        ]
+    lines.append('exec ' + shlex.join(spec.command))
     return '\n'.join(lines) + '\n'
 
 
