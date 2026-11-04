@@ -111,7 +111,7 @@ def test_config_checks_scheduler_settings(config_env, capsys):
     assert '[class.big]' in out     # everything is still shown
     assert err.splitlines() == [
         (f"jug-hpc: warning: {user}: [pbz] is ignored: no scheduler backend named 'pbz' "
-         "is installed (did you mean 'pbs'? available: pbs)"),
+         "is installed (did you mean 'pbs'? available: local, pbs)"),
         (f"jug-hpc: error: {user}: [pbs]: 'select.ncpus' cannot be set as a raw option: "
          'use cpus in jug_hpc.toml'),
         (f"jug-hpc: error: {project / 'jug_hpc.toml'}: [class.big.pbs]: 'directives' "

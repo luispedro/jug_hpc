@@ -40,6 +40,7 @@ Homepage = "https://github.com/luispedro/jug_hpc"
 jug-hpc = "jug_hpc.cli:main"
 
 [project.entry-points."jug_hpc.schedulers"]
+local = "jug_hpc.schedulers.local:LocalScheduler"
 pbs = "jug_hpc.schedulers.pbs:PBSScheduler"
 
 [dependency-groups]

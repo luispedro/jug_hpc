@@ -265,6 +265,19 @@ Notes for the remaining steps:
   for `-o`/`-e`, that single-element arrays are avoided correctly, and the
   `qsub` output format. `query`/`outcome`/`cancel` raise NotImplementedError
   (milestones 3–4).
+- Local backend (`schedulers/local.py`, done; its docstring has the details):
+  `python -m jug_hpc.schedulers.local submit|status|cancel` is a tiny
+  scheduler playing `qsub`/`qstat`/`qdel`, called through the runner like any
+  other; the backend's parsing (`parse_job_id`, `parse_status_output`) is pure.
+  `submit` forks a detached supervisor that runs `bash <script>` once per
+  worker (each in its own process group), enforces the wall time (SIGTERM,
+  SIGKILL after `KILL_GRACE`), and writes `result.json`. Jobs live in
+  `$XDG_STATE_HOME/jug_hpc/local/<id>/` (IDs 1, 2, ...); a lock held by the
+  supervisor tells a running job from one whose supervisor died. Cancelling
+  creates a `cancel` file that the supervisor polls (no PIDs, so no PID-reuse
+  risk). `query`/`outcome`/`cancel` are implemented, so milestone 3's
+  end-to-end tests can use it. An array's outcome is its worst worker's
+  (`combine_outcomes`); the PBS backend may want the same rule.
 - `submit` must create `logs/` and `logs/scheduler/` before `qsub` (the
   script's `mkdir -p` is too late for PBS's own `-o`/`-e`).
 - `submit` should pass the jugfile's task names to `selector_args`, so the
