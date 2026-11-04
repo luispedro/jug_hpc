@@ -30,6 +30,13 @@ def build_parser():
             'Show the merged cluster settings (with the file each value came '
             'from) and the project settings (with every resource class fully '
             'resolved, marking values inherited from [default] or built in).'))
+    commands.add_parser(
+        'check',
+        help='show which resource class runs each task of the jugfile',
+        description=(
+            'Load the jugfile and list, for every resource class, the tasks it '
+            'runs (counted per task name). Tasks matched by two classes are an '
+            'error (exit status 1); classes matching no task are a warning.'))
     return parser
 
 
@@ -46,7 +53,11 @@ def main(argv=None):
 
 
 def _error(message):
-    print(f'{PROG}: error: {message}', file=sys.stderr)
+    _message('error', message)
+
+
+def _message(kind, message):
+    print(f'{PROG}: {kind}: {message}', file=sys.stderr)
 
 
 def cmd_config(args, start):
@@ -91,8 +102,49 @@ def cmd_config(args, start):
     return status
 
 
+def cmd_check(args, start):
+    '''``jug-hpc check``: the listing goes to stdout, problems to stderr'''
+    from .check import check
+    from .config import (
+        PROJECT_FILE,
+        ConfigError,
+        find_project_dir,
+        load_project_settings,
+    )
+    from .jugstate import JugfileError, load_project
+
+    project_dir = find_project_dir(start)
+    if project_dir is None:
+        _error(f'no {PROJECT_FILE} found in {start.absolute()} or any parent '
+               'directory')
+        return 1
+    try:
+        settings = load_project_settings(project_dir)
+        state = load_project(settings)
+    except ConfigError as e:
+        _error(e)
+        return 1
+    except JugfileError as e:
+        if e.details:
+            print(e.details.rstrip('\n'), file=sys.stderr)
+        _error(e)
+        return 1
+    report = check(settings, state)
+    # flushed so that the listing comes before the messages when both
+    # streams go to the same file
+    print(report.text, flush=True)
+    for note in report.notes:
+        _message('note', note)
+    for warning in report.warnings:
+        _message('warning', warning)
+    for error in report.errors:
+        _error(error)
+    return 0 if report.ok else 1
+
+
 COMMANDS = {
     'config': cmd_config,
+    'check': cmd_check,
 }
 
 

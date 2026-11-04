@@ -139,7 +139,7 @@ def load_jugfile(jugfile, jugdir=None, cwd=None):
                 # linecache warns about the jugfile's module, which Jug
                 # creates without a __spec__ (the source is still found)
                 warnings.simplefilter('ignore', DeprecationWarning)
-                details = traceback.format_exc()
+                details = _jugfile_traceback(e, jugfile)
             raise JugfileError(
                 f'{jugfile}: error while loading the jugfile: '
                 f'{type(e).__name__}: {e}',
@@ -152,6 +152,19 @@ def load_jugfile(jugfile, jugdir=None, cwd=None):
         tasks=tasks,
         hit_barrier=bool(jugspace.get('__jug__hasbarrier__', False)),
     )
+
+
+def _jugfile_traceback(e, jugfile):
+    '''The traceback of ``e`` from the jugfile's first frame on
+
+    The frames above it (jug_hpc and ``jug.init``) are of no use to the
+    user. If the jugfile has no frame (e.g. a SyntaxError, raised while
+    compiling it), only the exception is formatted.
+    '''
+    tb = e.__traceback__
+    while tb is not None and tb.tb_frame.f_code.co_filename != str(jugfile):
+        tb = tb.tb_next
+    return ''.join(traceback.format_exception(type(e), e, tb))
 
 
 class _DropJugImportError(logging.Filter):

@@ -127,6 +127,18 @@ def test_error(project):
     assert 'RuntimeError: broken jugfile' in msg
     assert 'failing.py' in e.value.details
     assert "raise RuntimeError('broken jugfile')" in e.value.details
+    # Only the jugfile's frames: not jug_hpc's or Jug's
+    assert 'jugstate.py' not in e.value.details
+    assert 'jug.py' not in e.value.details
+
+
+def test_syntax_error(project):
+    (project / 'bad.py').write_text('x = (\n')
+    with pytest.raises(JugfileError) as e:
+        load_jugfile('bad.py', cwd=project)
+    assert 'SyntaxError' in str(e.value)
+    assert 'bad.py' in e.value.details
+    assert 'jugstate.py' not in e.value.details
 
 
 def test_error_is_not_logged(project, caplog):

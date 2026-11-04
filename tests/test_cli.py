@@ -105,3 +105,95 @@ def test_project_dir_must_exist(tmp_path, capsys):
         main(['-C', str(tmp_path / 'missing'), 'config'])
     assert e.value.code == 2
     assert 'not a directory' in capsys.readouterr().err
+
+
+# --- jug-hpc check -----------------------------------------------------------
+
+@pytest.fixture
+def check_project(tmp_path):
+    (tmp_path / 'jugfile.py').write_text(
+        'from jug import TaskGenerator\n'
+        '@TaskGenerator\ndef small(i):\n    return i\n'
+        '@TaskGenerator\ndef big(xs):\n    return xs\n'
+        'big([small(i) for i in range(2)])\n')
+    (tmp_path / 'sub').mkdir()
+    return tmp_path
+
+
+def write_toml(project, classes=''):
+    (project / 'jug_hpc.toml').write_text(
+        f'[default]\nmemory = "4G"\ntime = "1h"\n{classes}')
+
+
+def test_check(check_project, capsys, monkeypatch):
+    write_toml(check_project, '[class.big]\nmatch = "big"\nmemory = "64G"\n')
+    monkeypatch.chdir(check_project / 'sub')
+    assert main(['check']) == 0
+    out, err = capsys.readouterr()
+    assert err == ''
+    assert out.splitlines() == [
+        'Jugfile: jugfile.py (3 tasks)',
+        '',
+        "[class.big]  match = 'big'  (1 task)",
+        '  1  jugfile.big',
+        '',
+        '[default]  (2 tasks)',
+        '  2  jugfile.small',
+    ]
+
+
+def test_check_does_not_need_cluster_settings(check_project, capsys, monkeypatch):
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(check_project / 'no-such-dir'))
+    write_toml(check_project)
+    assert main(['-C', str(check_project), 'check']) == 0
+
+
+def test_check_overlap(check_project, capsys):
+    write_toml(check_project,
+               '[class.a]\nmatch = "big"\n[class.b]\npattern = "/^jugfile\\\\.b/"\n'
+               '[class.c]\nmatch = "nothing"\n')
+    assert main(['-C', str(check_project), 'check']) == 1
+    out, err = capsys.readouterr()
+    assert 'Matched by several classes (error)  (1 task)' in out
+    errors = err.splitlines()
+    assert len(errors) == 2
+    assert errors[0].startswith('jug-hpc: warning: ')
+    assert '[class.c]' in errors[0]
+    assert errors[1].startswith('jug-hpc: error: ')
+    assert "task 'jugfile.big' is matched by 2 classes" in errors[1]
+
+
+def test_check_barrier_note(check_project, capsys):
+    (check_project / 'jugfile.py').write_text(
+        'from jug import TaskGenerator, barrier\n'
+        '@TaskGenerator\ndef f(i):\n    return i\n'
+        'f(1)\nbarrier()\nf(2)\n')
+    write_toml(check_project)
+    assert main(['-C', str(check_project), 'check']) == 0
+    out, err = capsys.readouterr()
+    assert '[default]  (1 task)' in out
+    assert err.startswith('jug-hpc: note: loading stopped at a barrier()')
+
+
+def test_check_no_project(tmp_path, capsys):
+    assert main(['-C', str(tmp_path), 'check']) == 1
+    err = capsys.readouterr().err
+    assert f'no jug_hpc.toml found in {tmp_path}' in err
+
+
+def test_check_config_error(check_project, capsys):
+    (check_project / 'jug_hpc.toml').write_text('[default]\nmemory = "4G"\n')
+    assert main(['-C', str(check_project), 'check']) == 1
+    assert "[default] must set 'time'" in capsys.readouterr().err
+
+
+def test_check_jugfile_error(check_project, capsys):
+    (check_project / 'jugfile.py').write_text('raise ValueError("oops")\n')
+    write_toml(check_project)
+    assert main(['-C', str(check_project), 'check']) == 1
+    out, err = capsys.readouterr()
+    assert out == ''
+    assert err.startswith('Traceback')
+    assert 'jugstate.py' not in err
+    assert err.splitlines()[-1].startswith('jug-hpc: error: ')
+    assert 'ValueError: oops' in err.splitlines()[-1]
