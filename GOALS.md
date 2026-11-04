@@ -58,7 +58,8 @@ Configuration is declarative TOML, split into two files:
 
 Neither file can run code or import the jugfile, so principle 1 holds by
 construction. Both can be checked against a schema, and Python 3.11+ reads
-them with the standard library (`tomllib`).
+them with the standard library (`tomllib`), which is why jug_hpc requires
+Python 3.11 or later.
 
 ### Cluster file
 
@@ -188,8 +189,8 @@ This choice shapes the rest of the design and must be made first.
 
 ## Requirements
 
-- **Scheduler support**: SLURM first, behind a backend interface so that
-  SGE/LSF/PBS can be added later.
+- **Scheduler support**: PBS first, behind a backend interface so that
+  other schedulers (SLURM next, then SGE/LSF) are easy to add or swap in.
 - **Name matching**: identical to `jug execute --name`/`--pattern`. Tasks
   matched by no class go to the default class. A task matched by more than one
   class is a configuration error.
@@ -259,7 +260,7 @@ This choice shapes the rest of the design and must be made first.
 
 ## Success criteria
 
-- A jugfile with three resource classes runs to completion on SLURM with a
+- A jugfile with three resource classes runs to completion on PBS with a
   single `jug-hpc submit`, and the jugfile itself is unchanged.
 - No worker sits idle for more than a few minutes waiting for dependencies.
 - `--dry-run` output is enough for a user to reproduce the submission by
