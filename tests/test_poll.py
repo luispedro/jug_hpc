@@ -255,7 +255,8 @@ def test_poll_default_class_selection(setup):
     submitter.poll()
     script = (state.project_dir / '.jug_hpc' / 'scripts' / 'default-1.sh').read_text()
     assert 'jug execute' in script
-    assert ('--exclude-pattern' in script) or ('--pattern' in script)
+    # --exclude-name with newer Jug, otherwise a --pattern built from the names
+    assert ('--exclude-name' in script) or ('--pattern' in script)
 
 
 def test_poll_overlap_is_an_error(project):
@@ -480,10 +481,12 @@ def wait_for_jobs(sched, jobs):
         time.sleep(0.1)
 
 
-def local_project(tmp_path, monkeypatch, jugfile):
-    toml = ('setup = "export PATH=' + str(Path(sys.executable).parent) + ':$PATH"\n'
-            '[default]\nmemory = "1G"\ntime = "1h"\nworkers = 2\n'
-            '[class.middle]\nmatch = "middle"\nworkers = 5\n')
+LOCAL_PROJECT = ('[default]\nmemory = "1G"\ntime = "1h"\nworkers = 2\n'
+                 '[class.middle]\nmatch = "middle"\nworkers = 5\n')
+
+
+def local_project(tmp_path, monkeypatch, jugfile, toml=LOCAL_PROJECT):
+    toml = 'setup = "export PATH=' + str(Path(sys.executable).parent) + ':$PATH"\n' + toml
     xdg = tmp_path / 'xdg' / 'jug_hpc'
     xdg.mkdir(parents=True)
     (xdg / 'cluster.toml').write_text('scheduler = "local"\n')
@@ -560,3 +563,88 @@ def test_cli_submit_blocked(tmp_path, monkeypatch, capsys):
                    'tasks waiting for them: [class.middle] 1\n'
                    "jug-hpc: note: the worker logs say why the tasks failed; once fixed, "
                    "'jug cleanup --failed-only' lets them run again\n")
+
+
+BARRIER = '''\
+from jug import TaskGenerator, barrier
+
+@TaskGenerator
+def first(n):
+    return list(range(n))
+
+@TaskGenerator
+def middle(x):
+    return x * 2
+
+@TaskGenerator
+def last(xs):
+    return sum(xs)
+
+blocks = first(3)
+barrier()
+total = last([middle(b) for b in blocks.value()])
+'''
+
+
+@needs_bash
+def test_cli_submit_runs_barrier(tmp_path, monkeypatch, capsys):
+    '''Tasks created after a barrier() are seen once the tasks before it finish'''
+    project_dir, sched = local_project(tmp_path, monkeypatch, BARRIER)
+    status = main(['-C', str(project_dir), 'submit', '--interval=0.2'])
+    out, err = capsys.readouterr()
+    records = ProjectState(project_dir).jobs()
+    wait_for_jobs(sched, [r.job_id for r in records])
+    logs = '\n'.join(p.read_text() for p in (project_dir / 'logs').glob('*.log'))
+    assert status == 0, err + out + logs
+    assert err == ''
+    lines = [line.split('] ', 1)[1] for line in out.splitlines()]
+    # only the task before the barrier is known at first
+    assert lines[:2] == [
+        'default: submitted job 1 (1 worker, .jug_hpc/scripts/default-1.sh)',
+        ('tasks: 0 waiting, 1 ready, 0 running, 0 failed, 0 finished (more after a barrier); '
+         'workers queued or running: 1'),
+    ]
+    assert lines[-1] == 'every task is finished'
+    assert lines[-2].startswith('tasks: 0 waiting, 0 ready, 0 running, 0 failed, 5 finished')
+    assert [r.class_name for r in records][:2] == ['default', 'middle']
+    for outcome in sched.outcome([r.job_id for r in records]).values():
+        assert outcome.outcome is Outcome.SUCCESS, logs
+    state = load_project(load_project_settings(project_dir))
+    assert not state.hit_barrier
+    [i] = [i for i, t in enumerate(state.tasks) if t.name == 'jugfile.last']
+    assert state.store.load(state.hashes[i].decode()) == 6
+
+
+SLOW_TASKS = '''\
+import time
+from jug import TaskGenerator
+
+@TaskGenerator
+def slow(i):
+    time.sleep(0.5)
+    return i
+
+results = [slow(i) for i in range(6)]
+'''
+
+
+@needs_bash
+def test_cli_submit_replaces_stopped_workers(tmp_path, monkeypatch, capsys):
+    '''Workers that stop because of JUG_MAX_SECONDS are replaced until the tasks are done'''
+    toml = '[default]\nmemory = "1G"\ntime = "00:00:10"\ntime_fraction = 0.1\nworkers = 1\n'
+    project_dir, sched = local_project(tmp_path, monkeypatch, SLOW_TASKS, toml)
+    status = main(['-C', str(project_dir), 'submit', '--interval=0.2'])
+    out, err = capsys.readouterr()
+    records = ProjectState(project_dir).jobs()
+    wait_for_jobs(sched, [r.job_id for r in records])
+    logs = '\n'.join(p.read_text() for p in (project_dir / 'logs').glob('*.log'))
+    assert status == 0, err + out + logs
+    assert err == ''
+    assert out.splitlines()[-1].endswith('every task is finished')
+    # each worker runs about two tasks (JUG_MAX_SECONDS=1) and ends by itself
+    assert len(records) >= 2, out
+    assert all(r.workers == 1 for r in records)
+    for outcome in sched.outcome([r.job_id for r in records]).values():
+        assert outcome.outcome is Outcome.SUCCESS, logs
+    state = load_project(load_project_settings(project_dir))
+    assert all(t.can_load(state.store) for t in state.tasks)

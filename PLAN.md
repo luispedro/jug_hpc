@@ -403,6 +403,13 @@ cluster and runs a one-class jugfile to completion. → **Release 0.1.**
 7. End-to-end tests with the local backend: a three-class chain, alternating
    classes (A→B→A), a graph with a `barrier()`, and workers that stop early
    because of `JUG_MAX_SECONDS` (the submitter must replace them).
+   - Done in `tests/test_poll.py`: a default → middle → default chain
+     (covers A→B→A), a `barrier()` whose later tasks belong to another class
+     (the first poll knows only the task before the barrier), workers stopped
+     by `JUG_MAX_SECONDS` (each runs about two tasks and is replaced), and a
+     failed task (exit status 1). Still missing: a three-class chain. The
+     chain and barrier tests take ~13 s, because a default worker waits one
+     Jug wait cycle (12 s) for the last task.
 
 **Done when:** the three-class jugfile from the success criteria runs to
 completion on the local backend and on a real PBS cluster from a single
