@@ -41,6 +41,7 @@ jug-hpc = "jug_hpc.cli:main"
 
 [dependency-groups]
 dev = [
+  "hypothesis>=6.170.14",
   "pytest",
   "ruff",
 ]
