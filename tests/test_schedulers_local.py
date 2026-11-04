@@ -20,6 +20,7 @@ from jug_hpc.schedulers import (
     JobId,
     JobOutcome,
     JobState,
+    JobStatus,
     Outcome,
     SchedulerError,
     create_scheduler,
@@ -164,23 +165,29 @@ def test_combine_outcomes():
 
 def test_parse_status_output():
     stdout = json.dumps({
-        '1': {'state': 'running'},
+        '1': {'state': 'running', 'workers': 3, 'finished': 1},
         '2': {'state': 'finished', 'elements': {'1': {'returncode': 0, 'killed': None},
                                                 '2': {'returncode': 0, 'killed': None}}},
         '3': {'state': 'finished', 'elements': None},
         '4': {'state': 'unknown'},
     })
     assert parse_status_output(stdout) == {
-        '1': (JobState.RUNNING, None),
-        '2': (JobState.FINISHED, JobOutcome(Outcome.SUCCESS, 0)),
-        '3': (JobState.FINISHED,
+        '1': (JobStatus(JobState.RUNNING, running=2), None),
+        '2': (JobStatus(JobState.FINISHED), JobOutcome(Outcome.SUCCESS, 0)),
+        '3': (JobStatus(JobState.FINISHED),
               JobOutcome(Outcome.UNKNOWN, detail='the local supervisor process died')),
-        '4': (JobState.UNKNOWN, None),
+        '4': (JobStatus(JobState.UNKNOWN), None),
     }
 
 
-@pytest.mark.parametrize('stdout', ['', '[1]', '{"1": {"state": "odd"}}', '{"1": {}}',
-                                    '{"1": {"state": "finished", "elements": {"x": {}}}}'])
+@pytest.mark.parametrize('stdout', [
+    '', '[1]', '{"1": {"state": "odd"}}', '{"1": {}}',
+    '{"1": {"state": "finished", "elements": {"x": {}}}}',
+    '{"1": {"state": "running"}}',
+    '{"1": {"state": "running", "workers": 2, "finished": 2}}',
+    '{"1": {"state": "running", "workers": 2, "finished": -1}}',
+    '{"1": {"state": "running", "workers": "2", "finished": 0}}',
+])
 def test_parse_status_output_fails(stdout):
     with pytest.raises(SchedulerError, match='could not parse the output of status'):
         parse_status_output(stdout)
@@ -189,14 +196,15 @@ def test_parse_status_output_fails(stdout):
 def test_query_outcome_cancel_commands():
     runner = FakeRunner()
     runner.on(sys.executable, '-m', 'jug_hpc.schedulers.local', 'status', stdout=json.dumps({
-        '5': {'state': 'running'},
+        '5': {'state': 'running', 'workers': 1, 'finished': 0},
         '6': {'state': 'finished', 'elements': {'1': {'returncode': 2, 'killed': None}}},
     }))
     runner.on(sys.executable, '-m', 'jug_hpc.schedulers.local', 'cancel')
     sched = local(runner)
     jobs = [JobId('5'), JobId('6'), JobId('7')]
-    assert sched.query(jobs) == {'5': JobState.RUNNING, '6': JobState.FINISHED,
-                                 '7': JobState.UNKNOWN}
+    assert sched.query(jobs) == {'5': JobStatus(JobState.RUNNING, running=1),
+                                 '6': JobStatus(JobState.FINISHED),
+                                 '7': JobStatus(JobState.UNKNOWN)}
     assert sched.outcome(jobs) == {'6': JobOutcome(Outcome.FAILED, 2, None, 'exit status 2')}
     sched.cancel(['5'])
     assert sched.query([]) == {}
@@ -224,7 +232,7 @@ def test_command_failures():
 
 def wait_finished(sched, job, timeout=30):
     deadline = time.monotonic() + timeout
-    while sched.query([job])[job] is not JobState.FINISHED:
+    while sched.query([job])[job].state is not JobState.FINISHED:
         assert time.monotonic() < deadline, f'job {job} did not finish'
         time.sleep(0.1)
     return sched.outcome([job])[job]
@@ -295,7 +303,7 @@ def test_run_time_limit(run):
 @needs_bash
 def test_cancel(run):
     sched, job, _ = run(('sleep', '60'), workers=2)
-    assert sched.query([job]) == {job: JobState.RUNNING}
+    assert sched.query([job]) == {job: JobStatus(JobState.RUNNING, running=2)}
     sched.cancel([job, JobId('99')])
     outcome = wait_finished(sched, job)
     assert outcome.outcome is Outcome.KILLED_SIGNAL
@@ -303,14 +311,30 @@ def test_cancel(run):
     sched.cancel([job])     # finished: ignored
 
 
+@needs_bash
+def test_query_counts_running_workers(run):
+    '''Workers that ended are no longer counted while the others run'''
+    sched, job, _ = run(('sh', '-c', '[ "$JUG_HPC_ARRAY_INDEX" = 2 ] || exec sleep 60'),
+                        workers=3)
+    deadline = time.monotonic() + 30
+    while (status := sched.query([job])[job]) != JobStatus(JobState.RUNNING, running=2):
+        assert status == JobStatus(JobState.RUNNING, running=3), status
+        assert time.monotonic() < deadline, 'worker 2 did not end'
+        time.sleep(0.1)
+    sched.cancel([job])
+    assert wait_finished(sched, job).outcome is Outcome.KILLED_SIGNAL
+    assert sched.query([job]) == {job: JobStatus(JobState.FINISHED)}
+
+
 def test_unknown_and_lost_jobs(tmp_path):
     jobs = tmp_path / 'jobs'
     sched = LocalScheduler(CLUSTER, SubprocessRunner(), jobs)
-    assert sched.query(['1', '../x']) == {'1': JobState.UNKNOWN, '../x': JobState.UNKNOWN}
+    unknown = JobStatus(JobState.UNKNOWN)
+    assert sched.query(['1', '../x']) == {'1': unknown, '../x': unknown}
     (jobs / '1').mkdir(parents=True)     # a supervisor that died without a result
     (jobs / '1' / 'info.json').write_text('{}')
     (jobs / '1' / 'lock').touch()
-    assert sched.query(['1']) == {'1': JobState.FINISHED}
+    assert sched.query(['1']) == {'1': JobStatus(JobState.FINISHED)}
     assert sched.outcome(['1'])['1'].outcome is Outcome.UNKNOWN
 
 

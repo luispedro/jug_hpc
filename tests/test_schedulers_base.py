@@ -8,6 +8,7 @@ from jug_hpc.runner import FakeRunner, SubprocessRunner
 from jug_hpc.schedulers import (
     JobId,
     JobState,
+    JobStatus,
     Scheduler,
     SchedulerError,
     UnknownSchedulerError,
@@ -34,7 +35,7 @@ class FakeScheduler(Scheduler):
         return JobId(stdout.strip())
 
     def query(self, jobs):
-        return {j: JobState.UNKNOWN for j in jobs}
+        return {j: JobStatus(JobState.UNKNOWN) for j in jobs}
 
     def outcome(self, jobs):
         return {}
@@ -157,3 +158,10 @@ def test_validate_raw_options_default():
 def test_abstract():
     with pytest.raises(TypeError):
         Scheduler(ClusterSettings(scheduler='x'))
+
+
+def test_job_status():
+    assert JobStatus(JobState.FINISHED).active == 0
+    assert JobStatus(JobState.RUNNING, queued=2, running=3).active == 5
+    with pytest.raises(ValueError, match='negative'):
+        JobStatus(JobState.RUNNING, running=-1)

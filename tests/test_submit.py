@@ -317,7 +317,7 @@ def test_cli_all_runs_jugfile(tmp_path, monkeypatch, capsys):
     sched = LocalScheduler(cluster, jobs_dir=tmp_path / 'state' / 'jug_hpc' / 'local')
     jobs = [r.job_id for r in records]
     deadline = time.monotonic() + 120
-    while any(s is not JobState.FINISHED for s in sched.query(jobs).values()):
+    while any(s.state is not JobState.FINISHED for s in sched.query(jobs).values()):
         assert time.monotonic() < deadline, 'jobs did not finish'
         time.sleep(0.1)
     logs = '\n'.join(p.read_text() for p in (project_dir / 'logs').glob('*.log'))

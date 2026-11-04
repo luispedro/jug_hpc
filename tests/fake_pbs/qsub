@@ -8,8 +8,12 @@
 #   home/               the jobs' working directory (PBS starts jobs in $HOME)
 #   jobs/<n>.sh         the job's copy of the script (qsub copies it, too)
 #   jobs/<n>[-<i>].exit exit status of the job (of array element <i>)
+#   jobs/<n>.qstat      the job's entry in the output of qstat -f -F json (see
+#                       the fake qstat next to this file)
 #   fail                if it exists, qsub prints its contents to stderr and
 #                       exits with status 1 without submitting
+#   hold                if it exists, jobs are held: they are not run, and
+#                       qstat shows them as held (job_state H) forever
 #
 # Like PBS, it reads the #PBS directives before the first non-comment line:
 # -J 1-<n> makes an array job (output "<n>[].fakepbs", one run per index), and
@@ -77,8 +81,17 @@ run() {          # run one job or array element: run <PBS_JOBID> <name> [<index>
     echo "$status" >"$FAKE_PBS_DIR/jobs/$2.exit"
 }
 
+state=F
+[ -e "$FAKE_PBS_DIR/hold" ] && state=H
+entry="$FAKE_PBS_DIR/jobs/$n.qstat"
 if [ -z "$array" ]; then
-    run "$n.fakepbs" "$n"
+    if [ "$state" = H ]; then
+        printf '"%s":{"job_state":"H","Hold_Types":"u"}' "$n.fakepbs" >"$entry"
+    else
+        run "$n.fakepbs" "$n"
+        printf '"%s":{"job_state":"F","Exit_status":%d}' \
+            "$n.fakepbs" "$(cat "$FAKE_PBS_DIR/jobs/$n.exit")" >"$entry"
+    fi
     echo "$n.fakepbs"
 else
     case "$array" in
@@ -89,9 +102,17 @@ else
         echo "qsub (fake): single-element array" >&2   # some PBS sites reject them
         exit 2
     fi
-    for i in $(seq 1 "$last"); do
-        run "$n[$i].fakepbs" "$n-$i" "$i" &
-    done
-    wait
+    queued=$last expired=0
+    if [ "$state" = F ]; then
+        for i in $(seq 1 "$last"); do
+            run "$n[$i].fakepbs" "$n-$i" "$i" &
+        done
+        wait
+        queued=0 expired=$last
+    fi
+    printf '"%s":{"job_state":"%s","array":"True","array_state_count":"%s",%s}' \
+        "$n[].fakepbs" "$state" \
+        "Queued:$queued Running:0 Exiting:0 Expired:$expired " \
+        "\"array_indices_submitted\":\"1-$last\"" >"$entry"
     echo "$n[].fakepbs"
 fi

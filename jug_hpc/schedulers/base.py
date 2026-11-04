@@ -30,6 +30,7 @@ __all__ = [
     'JobId',
     'JobOutcome',
     'JobState',
+    'JobStatus',
     'Outcome',
     'Scheduler',
     'SchedulerError',
@@ -52,6 +53,38 @@ class JobState(enum.Enum):
     RUNNING = 'running'
     FINISHED = 'finished'    # ended, whatever the outcome
     UNKNOWN = 'unknown'      # the scheduler no longer knows the job
+
+
+@dataclass(frozen=True)
+class JobStatus:
+    '''Where a job and its workers are in the scheduler's queue
+
+    A job runs one worker, or several as an array whose elements start and end
+    independently. The submitter counts *active* workers (queued or running),
+    so a long array of which only a few elements are left counts for those few.
+
+    Attributes
+    ----------
+    state : JobState
+        The job as a whole: queued until its first worker starts, running until
+        its last worker ends, then finished
+    queued : int
+        Workers waiting to start
+    running : int
+        Workers running (including those being stopped)
+    '''
+    state: JobState
+    queued: int = 0
+    running: int = 0
+
+    def __post_init__(self):
+        if self.queued < 0 or self.running < 0:
+            raise ValueError(f'negative worker counts in {self!r}')
+
+    @property
+    def active(self):
+        '''Workers queued or running'''
+        return self.queued + self.running
 
 
 class Outcome(enum.Enum):
@@ -189,10 +222,15 @@ class Scheduler(ABC):
 
     @abstractmethod
     def query(self, jobs):
-        '''Current state of each job: dict JobId -> JobState
+        '''Current state of each job: dict JobId -> JobStatus
 
-        Every job in ``jobs`` is in the result (:attr:`JobState.UNKNOWN` if
-        the scheduler does not know it).
+        Every job in ``jobs`` is in the result (with :attr:`JobState.UNKNOWN`
+        if the scheduler does not know it, e.g. because it forgot a finished
+        job).
+
+        Raises
+        ------
+        SchedulerError
         '''
 
     @abstractmethod

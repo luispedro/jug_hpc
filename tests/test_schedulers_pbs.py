@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -12,22 +13,39 @@ from jug_hpc.config import (
     load_cluster_settings,
     load_project_settings,
 )
-from jug_hpc.runner import FakeRunner
-from jug_hpc.schedulers import SchedulerError, create_scheduler, get_scheduler
+from jug_hpc.runner import CommandError, FakeRunner
+from jug_hpc.schedulers import (
+    JobId,
+    JobState,
+    JobStatus,
+    SchedulerError,
+    create_scheduler,
+    get_scheduler,
+)
 from jug_hpc.schedulers.pbs import (
     JOB_NAME_MAX,
+    QSTAT_BATCH,
     PBSScheduler,
     format_memory,
     header_lines,
     job_name,
+    job_status,
+    match_jobs,
+    parse_array_state_count,
     parse_job_id,
+    parse_qstat_output,
     scheduler_log_dir,
+    unexpected_qstat_errors,
     validate_raw_options,
 )
 from jug_hpc.script import jug_execute_command
 from jug_hpc.worker import WorkerSpec, make_worker_spec
 
 GOLDEN = Path(__file__).parent / 'golden' / 'pbs'
+
+# Output of qstat -f -F json, in the format of OpenPBS 23 (not yet recorded on
+# a real cluster; replace with real output when the backend is tested on one)
+QSTAT_JSON = (Path(__file__).parent / 'pbs_output' / 'qstat-f-json.json').read_text()
 
 # Set JUG_HPC_UPDATE_GOLDEN=1 to rewrite the golden files (then review the diff)
 UPDATE = bool(os.environ.get('JUG_HPC_UPDATE_GOLDEN'))
@@ -145,6 +163,151 @@ def test_submit_fails():
     runner = FakeRunner().on('qsub', returncode=1, stderr='qsub: Unknown queue')
     with pytest.raises(SchedulerError, match='Unknown queue'):
         PBSScheduler(CLUSTER, runner).submit(Path('a.sh'), SPEC)
+
+
+# --- query ----------------------------------------------------------------------
+
+QUEUED, RUNNING = JobState.QUEUED, JobState.RUNNING
+FINISHED, UNKNOWN = JobState.FINISHED, JobState.UNKNOWN
+
+QSTAT_STATUSES = {
+    '1001.pbs01.example.org': JobStatus(FINISHED),
+    '1002.pbs01.example.org': JobStatus(RUNNING, running=1),
+    '1003.pbs01.example.org': JobStatus(QUEUED, queued=1),
+    '1004[].pbs01.example.org': JobStatus(RUNNING, queued=2, running=2),
+    '1005[].pbs01.example.org': JobStatus(QUEUED, queued=3),
+    '1006[].pbs01.example.org': JobStatus(FINISHED),
+}
+
+
+def test_parse_qstat_output():
+    assert parse_qstat_output(QSTAT_JSON) == QSTAT_STATUSES
+    assert parse_qstat_output('') == {}
+    assert parse_qstat_output('{"timestamp": 1, "pbs_server": "s"}') == {}
+
+
+@pytest.mark.parametrize('stdout, message', [
+    ('{"Jobs": {', 'Expecting'),
+    ('[]', 'not a JSON object'),
+    ('{"Jobs": []}', "'Jobs' is not a JSON object"),
+    ('{"Jobs": {"1.s": 3}}', 'job 1.s: its attributes are not'),
+    ('{"Jobs": {"1.s": {}}}', "job 1.s: unknown job_state None"),
+    ('{"Jobs": {"1.s": {"job_state": "Z"}}}', "unknown job_state 'Z'"),
+    ('{"Jobs": {"1[].s": {"job_state": "B"}}}', 'job 1\\[\\].s: bad array_state_count: None'),
+])
+def test_parse_qstat_output_fails(stdout, message):
+    with pytest.raises(SchedulerError, match=f'could not parse the output of qstat.*{message}'):
+        parse_qstat_output(stdout)
+
+
+@pytest.mark.parametrize('letter, state', [
+    ('Q', QUEUED), ('H', QUEUED), ('W', QUEUED), ('T', QUEUED),
+    ('R', RUNNING), ('E', RUNNING), ('S', RUNNING), ('U', RUNNING),
+    ('F', FINISHED), ('X', FINISHED), ('M', UNKNOWN),
+])
+def test_job_status_letters(letter, state):
+    status = job_status('7.s', {'job_state': letter})
+    assert status.state is state
+    assert status.active == (1 if state in (QUEUED, RUNNING) else 0)
+    assert status.queued == (state is QUEUED)
+
+
+def test_job_status_array():
+    counts = 'Queued:1 Running:2 Exiting:0 Expired:3'
+    # an array is recognized by its attribute or by its ID
+    assert job_status('7.s', {'job_state': 'B', 'array': 'True', 'array_state_count': counts}) \
+        == JobStatus(RUNNING, queued=1, running=2)
+    assert job_status('7[].s', {'job_state': 'H', 'array_state_count': 'Queued:4 Running:0'}) \
+        == JobStatus(QUEUED, queued=4)
+    # a finished array needs no counts
+    assert job_status('7[].s', {'job_state': 'F'}) == JobStatus(FINISHED)
+
+
+@pytest.mark.parametrize('text, expected', [
+    ('Queued:0 Running:2 Exiting:1 Expired:1 ',
+     {'Queued': 0, 'Running': 2, 'Exiting': 1, 'Expired': 1}),
+    ('Running:3 Queued:1', {'Queued': 1, 'Running': 3}),
+])
+def test_parse_array_state_count(text, expected):
+    assert parse_array_state_count(text) == expected
+
+
+@pytest.mark.parametrize('text', [None, '', 'Queued:1', 'Queued:1 Running:x', 'Queued 1 Running 2',
+                                  'Queued:-1 Running:0'])
+def test_parse_array_state_count_fails(text):
+    with pytest.raises(ValueError, match='bad array_state_count'):
+        parse_array_state_count(text)
+
+
+def test_unexpected_qstat_errors():
+    stderr = ('qstat: Unknown Job Id 99.pbs01\n'
+              'qstat: 98.pbs01 Job has finished, use -x or -H to obtain historical job '
+              'information\n\n')
+    assert unexpected_qstat_errors(stderr) == []
+    assert unexpected_qstat_errors('qstat: cannot connect to server pbs01 (errno=111)\n' +
+                                   stderr) == ['qstat: cannot connect to server pbs01 (errno=111)']
+
+
+def test_match_jobs():
+    jobs = [JobId('1002.pbs01'), JobId('1004[].pbs01'), JobId('1004.pbs01'),
+            JobId('1001.pbs01.example.org'), JobId('1007')]
+    assert match_jobs(jobs, QSTAT_STATUSES) == {
+        '1002.pbs01': JobStatus(RUNNING, running=1),
+        '1004[].pbs01': JobStatus(RUNNING, queued=2, running=2),
+        '1004.pbs01': JobStatus(UNKNOWN),     # not the array 1004[]
+        '1001.pbs01.example.org': JobStatus(FINISHED),
+        '1007': JobStatus(UNKNOWN),
+    }
+
+
+def test_query():
+    runner = FakeRunner().on('qstat', returncode=153, stdout=QSTAT_JSON,
+                             stderr='qstat: Unknown Job Id 1007.pbs01\n')
+    pbs = PBSScheduler(CLUSTER, runner)
+    jobs = [JobId('1004[].pbs01'), JobId('1003.pbs01'), JobId('1007.pbs01')]
+    assert pbs.query(jobs) == {
+        '1004[].pbs01': JobStatus(RUNNING, queued=2, running=2),
+        '1003.pbs01': JobStatus(QUEUED, queued=1),
+        '1007.pbs01': JobStatus(UNKNOWN),
+    }
+    assert runner.argvs == [('qstat', '-f', '-F', 'json', '-x', *jobs)]
+    assert pbs.query([]) == {}
+    assert len(runner.calls) == 1
+
+
+def test_query_unknown_only():
+    '''qstat may print nothing at all when it knows none of the jobs'''
+    runner = FakeRunner().on('qstat', returncode=153, stderr='qstat: Unknown Job Id 1.s\n')
+    assert PBSScheduler(CLUSTER, runner).query(['1.s']) == {'1.s': JobStatus(UNKNOWN)}
+
+
+def test_query_batches():
+    jobs = [JobId(f'{i}.s') for i in range(QSTAT_BATCH * 2 + 1)]
+    runner = FakeRunner().on('qstat', handler=lambda call: json.dumps({'Jobs': {
+        j: {'job_state': 'R'} for j in call.argv[5:]}}))
+    statuses = PBSScheduler(CLUSTER, runner).query(jobs)
+    assert statuses == {j: JobStatus(RUNNING, running=1) for j in jobs}
+    assert [len(c.argv) - 5 for c in runner.calls] == [QSTAT_BATCH, QSTAT_BATCH, 1]
+
+
+@pytest.mark.parametrize('returncode, stderr, message', [
+    (2, 'qstat: cannot connect to server pbs01 (errno=111)\n', 'cannot connect'),
+    (1, '', 'exit status 1'),
+    (153, 'qstat: Unknown Job Id 1.s\nqstat: something else\n', 'something else'),
+    (127, 'qstat: command not found', 'command not found'),
+])
+def test_query_fails(returncode, stderr, message):
+    runner = FakeRunner().on('qstat', returncode=returncode, stderr=stderr)
+    with pytest.raises(SchedulerError, match=f'pbs: could not query jobs: (?s:.*){message}'):
+        PBSScheduler(CLUSTER, runner).query(['1.s'])
+
+
+def test_query_timeout():
+    def hang(call):
+        raise CommandError(call.argv, None, reason='timed out after 300 seconds')
+    runner = FakeRunner().on('qstat', handler=hang)
+    with pytest.raises(SchedulerError, match='pbs: could not query jobs.*timed out'):
+        PBSScheduler(CLUSTER, runner).query(['1.s'])
 
 
 @pytest.mark.parametrize('raw', [

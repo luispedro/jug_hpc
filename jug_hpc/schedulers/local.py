@@ -27,6 +27,7 @@ Each job has a directory ``<jobs dir>/<job id>/`` holding:
 - ``lock``: locked by the supervisor while it runs, so a supervisor that died
   (e.g. killed with ``SIGKILL``) is detected even if its PID was reused;
 - ``cancel``: created by ``cancel``; the supervisor checks for it;
+- ``progress.json``: the workers that have ended, while others still run;
 - ``result.json``: written when every worker has ended;
 - ``supervisor.log``: the supervisor's own errors.
 
@@ -63,7 +64,7 @@ from ..config.errors import ConfigError
 from ..runner import CommandError
 from ..script import ScriptVars, render_script
 from ..units import format_hms, format_memory
-from .base import JobId, JobOutcome, JobState, Outcome, Scheduler, SchedulerError
+from .base import JobId, JobOutcome, JobState, JobStatus, Outcome, Scheduler, SchedulerError
 
 __all__ = [
     'KILL_GRACE',
@@ -222,12 +223,14 @@ def parse_status_output(stdout):
     Parameters
     ----------
     stdout : str
-        JSON: job ID -> ``{"state": ..., "elements": ...}``
+        JSON: job ID -> ``{"state": ...}``, plus ``"workers"`` and
+        ``"finished"`` (counts) for a running job and ``"elements"`` (the
+        content of ``result.json``, or null) for a finished one
 
     Returns
     -------
     jobs : dict
-        JobId -> (JobState, JobOutcome or None)
+        JobId -> (JobStatus, JobOutcome or None)
 
     Raises
     ------
@@ -240,7 +243,14 @@ def parse_status_output(stdout):
         for job_id, entry in data.items():
             state = JobState(entry['state'])
             outcome = None
-            if state is JobState.FINISHED:
+            status = JobStatus(state)
+            if state is JobState.RUNNING:
+                workers, finished = entry['workers'], entry['finished']
+                if not (isinstance(workers, int) and isinstance(finished, int)
+                        and 0 <= finished < workers):
+                    raise ValueError(f'bad worker counts for job {job_id}')
+                status = JobStatus(state, running=workers - finished)
+            elif state is JobState.FINISHED:
                 elements = entry.get('elements')
                 if elements is None:
                     outcome = JobOutcome(Outcome.UNKNOWN,
@@ -248,7 +258,7 @@ def parse_status_output(stdout):
                 else:
                     outcome = combine_outcomes(
                         {int(i): element_outcome(r) for i, r in elements.items()})
-            jobs[JobId(job_id)] = (state, outcome)
+            jobs[JobId(job_id)] = (status, outcome)
     except (ValueError, TypeError, KeyError, AttributeError) as e:
         raise SchedulerError(
             f'local: could not parse the output of status ({e}): {stdout.strip()!r}') from e
@@ -306,7 +316,7 @@ class LocalScheduler(Scheduler):
 
     def query(self, jobs):
         found = self._status(jobs)
-        return {j: found.get(j, (JobState.UNKNOWN, None))[0] for j in jobs}
+        return {j: found.get(j, (JobStatus(JobState.UNKNOWN), None))[0] for j in jobs}
 
     def outcome(self, jobs):
         '''How each finished job ended (jobs that have not finished are left out)'''
@@ -368,7 +378,14 @@ def _job_status(jobs_dir, job_id):
         return {'state': JobState.UNKNOWN.value}
     if not result.exists():
         if _lock_is_held(job_dir):
-            return {'state': JobState.RUNNING.value}
+            workers = json.loads((job_dir / 'info.json').read_text())['workers']
+            try:
+                finished = json.loads((job_dir / 'progress.json').read_text())['finished']
+            except FileNotFoundError:
+                finished = []
+            # all of them may have finished since the lock was checked
+            return {'state': JobState.RUNNING.value, 'workers': workers,
+                    'finished': min(len(finished), workers - 1)}
         if not result.exists():   # the supervisor may have finished meanwhile
             return {'state': JobState.FINISHED.value, 'elements': None}
     return {'state': JobState.FINISHED.value,
@@ -397,12 +414,15 @@ def _supervise(job_dir, job_id, script, workers, time_limit, output, name):
     kill_at = None
     returncodes = {}
     while True:
+        ended = len(returncodes)
         for i, p in procs.items():
             if i not in returncodes and p.poll() is not None:
                 returncodes[i] = p.returncode
         running = [i for i in procs if i not in returncodes]
         if not running:
             break
+        if len(returncodes) != ended:
+            _write_json(job_dir / 'progress.json', {'finished': sorted(returncodes)})
         now = time.monotonic()
         if kill_at is None:
             reason = None

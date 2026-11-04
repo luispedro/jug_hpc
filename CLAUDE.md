@@ -14,7 +14,8 @@ Current state: milestones 0–1 are done; milestone 2 is done in code (`schedule
 `jug-hpc submit --all|--dry-run`; only the manual test on a real PBS cluster is left).
 Milestone 3 has started: task counts per class (`jugstate.task_counts`,
 `classes.counts_by_class`, and `jugstate.subprocess_task_counts` for loading in a
-subprocess) exist; the polling `submitter.py` does not.
+subprocess) and `Scheduler.query()` for PBS and local (a `JobStatus` per job, with
+queued/running worker counts) exist; the polling `submitter.py` does not.
 
 ## Commands
 
@@ -122,6 +123,8 @@ required because TOML is read with `tomllib`; Jug is the only runtime dependency
   `monkeypatch.setenv('XDG_CONFIG_HOME', ...)` or an explicit `environ=` argument; the
   scheduler registry is faked by monkeypatching `schedulers.base._entry_points`.
 - `tests/fake_pbs/qsub` is a fake `qsub` (put on `PATH`, state in `$FAKE_PBS_DIR`) that runs
-  each job synchronously in a clean, PBS-like environment; `tests/test_fake_pbs.py` uses it
-  for end-to-end PBS tests. Its header comment documents its behaviour.
+  each job synchronously in a clean, PBS-like environment (or holds it, if a `hold` file
+  exists); `tests/fake_pbs/qstat` serves `qstat -f -F json [-x]` for its jobs.
+  `tests/test_fake_pbs.py` uses them for end-to-end PBS tests. Their header comments document
+  their behaviour. Sample PBS command output for unit tests lives in `tests/pbs_output/`.
 - Commit messages are short imperative summaries (`Add ...`, `Keep ...`).

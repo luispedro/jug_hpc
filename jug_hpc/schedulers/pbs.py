@@ -39,26 +39,47 @@ to the project directory when the logs are inside it (``qsub`` resolves
 relative paths against the directory it runs in). They catch what happens
 before the worker redirects its output (e.g. a failing ``setup``); the
 directory must exist before ``qsub`` runs.
+
+Jobs are queried with ``qstat -f -F json -x JOB...`` (``-x`` includes finished
+jobs while the server keeps their history), :data:`QSTAT_BATCH` jobs per call.
+A plain job's ``job_state`` letter gives its state; an array job's
+``array_state_count`` (``Queued:1 Running:2 Exiting:0 Expired:3``) gives how
+many of its workers are queued or running. Jobs that ``qstat`` does not list
+(``Unknown Job Id``, e.g. finished jobs whose history was purged) are
+:attr:`~.JobState.UNKNOWN`. Output is matched to the queried IDs by job number
+(``1234`` or ``1234[]``), as the server part of an ID may be written
+differently by ``qsub`` and ``qstat``.
 '''
 import difflib
+import json
 import os
 import re
 
 from ..config.errors import ConfigError
+from ..runner import CommandError
 from ..script import ScriptVars, render_script
 from ..units import format_hms, memory_in_unit
-from .base import JobId, Scheduler, SchedulerError
+from .base import JobId, JobState, JobStatus, Scheduler, SchedulerError
 
 __all__ = [
     'JOB_NAME_MAX',
+    'JOB_STATES',
+    'QSTAT_BATCH',
+    'QSTAT_TIMEOUT',
     'RAW_KEYS',
     'SCRIPT_VARS',
     'PBSScheduler',
     'format_memory',
     'header_lines',
     'job_name',
+    'job_status',
+    'match_jobs',
+    'parse_array_state_count',
     'parse_job_id',
+    'parse_qstat_output',
+    'qstat_command',
     'scheduler_log_dir',
+    'unexpected_qstat_errors',
     'validate_raw_options',
 ]
 
@@ -88,6 +109,36 @@ _RESOURCE_NAME_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*\Z')
 # qsub prints the job ID (``1234.server``, ``1234[].server`` for an array) on
 # its own line
 _JOB_ID_RE = re.compile(r'\d+(?:\[\])?(?:\.[^\s]+)?\Z')
+
+#: What each ``job_state`` letter of ``qstat`` means. Suspended jobs (S, U)
+#: still hold their allocation, so they count as running; a job moved to
+#: another server (M) is no longer known to this one.
+JOB_STATES = {
+    'Q': JobState.QUEUED,      # queued
+    'H': JobState.QUEUED,      # held
+    'W': JobState.QUEUED,      # waiting for its start time
+    'T': JobState.QUEUED,      # being moved
+    'R': JobState.RUNNING,     # running
+    'E': JobState.RUNNING,     # exiting
+    'B': JobState.RUNNING,     # array job: at least one element has started
+    'S': JobState.RUNNING,     # suspended
+    'U': JobState.RUNNING,     # suspended (workstation busy)
+    'F': JobState.FINISHED,    # finished
+    'X': JobState.FINISHED,    # array element: finished
+    'M': JobState.UNKNOWN,     # moved to another server
+}
+
+#: Jobs per ``qstat`` call
+QSTAT_BATCH = 100
+
+#: Seconds before a ``qstat`` call is given up
+QSTAT_TIMEOUT = 300
+
+# qstat's errors about jobs it does not list: unknown jobs (e.g. history
+# purged), and finished jobs when asked without -x
+_QSTAT_MISSING_RE = re.compile(r'Unknown Job Id|Job has finished')
+
+_ARRAY_COUNT_RE = re.compile(r'([A-Za-z]+):(\d+)\Z')
 
 # characters that cannot appear in a path in a #PBS -o/-e directive (whitespace
 # separates options; ':' separates a host name from the path)
@@ -196,6 +247,148 @@ def parse_job_id(stdout):
     raise SchedulerError(f'pbs: no job ID in the output of qsub: {stdout.strip()!r}')
 
 
+def qstat_command(jobs):
+    '''The ``qstat`` command line that queries ``jobs``'''
+    return ['qstat', '-f', '-F', 'json', '-x', *jobs]
+
+
+def _short_id(job_id):
+    '''The job number of a job ID: ``1234`` or ``1234[]`` (no server)'''
+    return job_id.split('.', 1)[0]
+
+
+def parse_array_state_count(text):
+    '''An array job's ``array_state_count``, as a dict
+
+    Parameters
+    ----------
+    text : str
+        E.g. ``'Queued:1 Running:2 Exiting:0 Expired:3 '``
+
+    Returns
+    -------
+    counts : dict
+        Name (``'Queued'``, ...) -> int; ``Queued`` and ``Running`` are always
+        present
+
+    Raises
+    ------
+    ValueError
+    '''
+    counts = {}
+    for item in str(text).split():
+        m = _ARRAY_COUNT_RE.match(item)
+        if m is None:
+            raise ValueError(f'bad array_state_count: {text!r}')
+        counts[m[1]] = int(m[2])
+    if 'Queued' not in counts or 'Running' not in counts:
+        raise ValueError(f'bad array_state_count: {text!r}')
+    return counts
+
+
+def job_status(job_id, attrs):
+    '''The JobStatus of one job, from its attributes in ``qstat -f -F json``
+
+    Parameters
+    ----------
+    job_id : str
+        As listed by ``qstat`` (``1234[].server`` for an array job)
+    attrs : dict
+        Its attributes (``job_state``, and ``array_state_count`` for an array)
+
+    Raises
+    ------
+    ValueError
+        If the attributes are not understood
+    '''
+    letter = attrs.get('job_state')
+    state = JOB_STATES.get(letter)
+    if state is None:
+        raise ValueError(f'unknown job_state {letter!r}')
+    is_array = attrs.get('array') in ('True', True) or _short_id(job_id).endswith('[]')
+    if state is JobState.QUEUED and not is_array:
+        return JobStatus(state, queued=1)
+    if state is JobState.RUNNING and not is_array:
+        return JobStatus(state, running=1)
+    if state not in (JobState.QUEUED, JobState.RUNNING):
+        return JobStatus(state)
+    counts = parse_array_state_count(attrs.get('array_state_count'))
+    return JobStatus(state, queued=counts['Queued'],
+                     running=counts['Running'] + counts.get('Exiting', 0))
+
+
+def parse_qstat_output(stdout):
+    '''The status of each job listed by ``qstat -f -F json``
+
+    Parameters
+    ----------
+    stdout : str
+        May be empty (``qstat`` lists nothing when it knows none of the jobs)
+
+    Returns
+    -------
+    jobs : dict
+        JobId (as listed) -> JobStatus
+
+    Raises
+    ------
+    SchedulerError
+        If the output is not understood
+    '''
+    if not stdout.strip():
+        return {}
+    def error(what):
+        return SchedulerError(f'pbs: could not parse the output of qstat ({what})')
+
+    try:
+        # strict=False: some PBS versions leave control characters unescaped
+        data = json.loads(stdout, strict=False)
+    except ValueError as e:
+        raise error(e) from e
+    if not isinstance(data, dict):
+        raise error('not a JSON object')
+    listed = data.get('Jobs', {})
+    if not isinstance(listed, dict):
+        raise error("'Jobs' is not a JSON object")
+    jobs = {}
+    for job_id, attrs in listed.items():
+        if not isinstance(attrs, dict):
+            raise error(f'job {job_id}: its attributes are not a JSON object')
+        try:
+            jobs[JobId(job_id)] = job_status(job_id, attrs)
+        except ValueError as e:
+            raise error(f'job {job_id}: {e}') from e
+    return jobs
+
+
+def unexpected_qstat_errors(stderr):
+    '''Lines of ``qstat``'s stderr other than those about jobs it does not list'''
+    return [line for line in stderr.splitlines()
+            if line.strip() and not _QSTAT_MISSING_RE.search(line)]
+
+
+def match_jobs(jobs, found):
+    '''The status of each of ``jobs``, from what ``qstat`` listed
+
+    Parameters
+    ----------
+    jobs : list of JobId
+        As printed by ``qsub``
+    found : dict
+        JobId (as listed by ``qstat``) -> JobStatus
+
+    Returns
+    -------
+    statuses : dict
+        Every job in ``jobs`` -> JobStatus (:attr:`JobState.UNKNOWN` if not
+        listed). A job is matched by its full ID, or else by its job number.
+    '''
+    by_number = {_short_id(j): s for j, s in found.items()}
+    unknown = JobStatus(JobState.UNKNOWN)
+    return {j: found[j] if j in found else by_number.get(_short_id(j), unknown)
+            for j in jobs}
+
+
 def validate_raw_options(raw, where):
     '''Check the shape of one ``[pbs]`` raw-options table
 
@@ -266,7 +459,21 @@ class PBSScheduler(Scheduler):
         validate_raw_options(raw, where)
 
     def query(self, jobs):
-        raise NotImplementedError('pbs: querying jobs is not implemented yet')
+        jobs = list(jobs)
+        found = {}
+        for start in range(0, len(jobs), QSTAT_BATCH):
+            argv = qstat_command(jobs[start:start + QSTAT_BATCH])
+            try:
+                result = self.runner.run(argv, check=False, timeout=QSTAT_TIMEOUT)
+            except CommandError as e:
+                raise SchedulerError(f'pbs: could not query jobs: {e}') from e
+            # qstat exits with an error when it does not know some of the jobs
+            if result.returncode != 0 and (unexpected_qstat_errors(result.stderr)
+                                           or not result.stderr.strip()):
+                error = CommandError(argv, result.returncode, result.stdout, result.stderr)
+                raise SchedulerError(f'pbs: could not query jobs: {error}')
+            found.update(parse_qstat_output(result.stdout))
+        return match_jobs(jobs, found)
 
     def outcome(self, jobs):
         raise NotImplementedError('pbs: job outcomes are not implemented yet')

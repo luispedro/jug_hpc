@@ -83,7 +83,7 @@ class Scheduler(ABC):
 
     # side effects (through self.runner)
     def submit(self, script: Path, spec: WorkerSpec) -> JobId
-    def query(self, jobs: list[JobId]) -> dict[JobId, JobState]      # queued/running/done
+    def query(self, jobs: list[JobId]) -> dict[JobId, JobStatus]     # state + active workers
     def outcome(self, jobs: list[JobId]) -> dict[JobId, JobOutcome]  # exit code, killed for mem/time
     def cancel(self, jobs: list[JobId]) -> None
 ```
@@ -143,7 +143,7 @@ allocation.
     (e.g. `ngpus = 1`);
   - `resources`: extra job-wide `-l` resources (e.g. `place = "scatter"`);
   - `directives`: a list of raw `#PBS` lines, passed through verbatim.
-- Queue state: `qstat -f -F json` (and `qstat -x` for finished jobs).
+- Queue state: `qstat -f -F json -x` (done, see milestone 3 step 2).
   Torque's `qstat` is different; Torque support is out of scope for 1.0 but
   must be possible as a separate backend.
 - Job outcome: PBS `Exit_status`, where negative values are PBS's own codes
@@ -311,8 +311,8 @@ Notes for the remaining steps:
   directories, exit status per element in `jobs/<n>[-<i>].exit`). Tests:
   `submit --all` runs a three-class jugfile to completion; the `--dry-run`
   commands run by hand in a shell do the same; a failing `qsub`. A fake
-  `qstat` (replaying recorded `qstat -f -F json` output) comes with `query()`
-  in milestone 3. Still to do: the manual test on a real PBS cluster.
+  `qstat` came with `query()` (milestone 3 step 2). Still to do: the manual
+  test on a real PBS cluster.
 
 **Done when:** `--dry-run` output can be submitted by hand on a real PBS
 cluster and runs a one-class jugfile to completion. → **Release 0.1.**
@@ -343,6 +343,23 @@ cluster and runs a one-class jugfile to completion. → **Release 0.1.**
      loading.
 2. `query()` in the PBS backend: queued/running/finished per job and array
    element, from `qstat -f -F json`.
+   - Done. `query()` now returns a `JobStatus` per job (base.py): the job's
+     `JobState` plus the number of its workers `queued` and `running`
+     (`active` = both), because an array whose elements end at different
+     times must count only its remaining workers. PBS: `qstat -f -F json -x
+     JOB...` in batches of 100, `job_state` letters for plain jobs,
+     `array_state_count` (Running + Exiting count as running) for arrays;
+     "Unknown Job Id" / "Job has finished" errors only make those jobs
+     UNKNOWN, any other error is a `SchedulerError`; output is matched to the
+     queried IDs by job number (`1234` / `1234[]`). Local: the supervisor
+     writes `progress.json` (ended workers), so a running job reports how
+     many of its workers still run. Tests use a sample of OpenPBS output
+     (`tests/pbs_output/`, not yet recorded on a real cluster) and a fake
+     `qstat` (`tests/fake_pbs/qstat`, serving entries left by the fake
+     `qsub`, which holds jobs instead of running them if a `hold` file
+     exists). To check on a real cluster: the JSON is valid (older PBS
+     versions had escaping bugs; parsing already uses `strict=False`), the
+     attribute names, and qstat's exit status and messages for unknown jobs.
 3. The submission rule, per class, at each poll:
    `wanted = min(ready, workers)`, `active = queued + running workers`,
    submit `wanted - active` new workers if positive. Running tasks hold a

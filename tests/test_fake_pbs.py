@@ -1,10 +1,11 @@
-'''The PBS backend against a fake ``qsub`` (``tests/fake_pbs/qsub``) on ``PATH``
+'''The PBS backend against a fake ``qsub`` and ``qstat`` (``tests/fake_pbs/``) on ``PATH``
 
 The fake records how it was called and runs each job before returning, the way
 PBS would: from ``$HOME``, with a clean environment and PBS's variables, and
 one run per array index. So these tests check what the unit tests in
 ``test_schedulers_pbs.py`` cannot: that the commands jug_hpc runs (or prints
-with ``--dry-run``) submit scripts that run a jugfile to completion.
+with ``--dry-run``) submit scripts that run a jugfile to completion, and that
+jobs are queried with commands that PBS understands.
 '''
 import os
 import shlex
@@ -16,8 +17,10 @@ from pathlib import Path
 import pytest
 
 from jug_hpc.cli import main
-from jug_hpc.config import load_project_settings
+from jug_hpc.config import ClusterSettings, load_project_settings
 from jug_hpc.jugstate import load_project
+from jug_hpc.schedulers import JobId, JobState, JobStatus
+from jug_hpc.schedulers.pbs import PBSScheduler
 from jug_hpc.state import ProjectState
 
 FAKE_PBS = Path(__file__).parent / 'fake_pbs'
@@ -82,9 +85,9 @@ def fake_pbs(tmp_path, monkeypatch):
     return project_dir, pbs_dir
 
 
-def qsub_calls(pbs_dir):
-    '''(cwd, arguments) of each qsub call'''
-    lines = (pbs_dir / 'qsub.log').read_text().splitlines()
+def qsub_calls(pbs_dir, command='qsub'):
+    '''(cwd, arguments) of each qsub (or qstat) call'''
+    lines = (pbs_dir / f'{command}.log').read_text().splitlines()
     return [(Path(cwd), args.split('\t')) for cwd, args in
             (line.split('\t', 1) for line in lines)]
 
@@ -176,3 +179,52 @@ def test_qsub_fails(fake_pbs, capsys):
     assert err.splitlines()[-1] == 'jug-hpc: note: not submitted: one, default'
     assert len(qsub_calls(pbs_dir)) == 1
     assert ProjectState(project_dir).jobs() == []
+
+
+def query(project_dir):
+    '''The status of every job recorded for the project, from the fake qstat'''
+    jobs = [r.job_id for r in ProjectState(project_dir).jobs()]
+    return PBSScheduler(ClusterSettings(scheduler='pbs')).query(jobs)
+
+
+def test_query_finished(fake_pbs):
+    project_dir, pbs_dir = fake_pbs
+    assert main(['-C', str(project_dir), 'submit', '--all']) == 0
+    finished = JobStatus(JobState.FINISHED)
+    assert query(project_dir) == {
+        '1001[].fakepbs': finished, '1002.fakepbs': finished, '1003[].fakepbs': finished}
+    assert qsub_calls(pbs_dir, 'qstat')[-1][1] == [
+        '-f', '-F', 'json', '-x', '1001[].fakepbs', '1002.fakepbs', '1003[].fakepbs']
+
+
+def test_query_held(fake_pbs):
+    project_dir, pbs_dir = fake_pbs
+    pbs_dir.mkdir()
+    (pbs_dir / 'hold').touch()
+    assert main(['-C', str(project_dir), 'submit', '--all']) == 0
+    assert query(project_dir) == {
+        '1001[].fakepbs': JobStatus(JobState.QUEUED, queued=2),
+        '1002.fakepbs': JobStatus(JobState.QUEUED, queued=1),
+        '1003[].fakepbs': JobStatus(JobState.QUEUED, queued=2),
+    }
+    assert exit_statuses(pbs_dir) == {}     # nothing ran
+
+
+@pytest.mark.usefixtures('fake_pbs')
+def test_query_unknown():
+    pbs = PBSScheduler(ClusterSettings(scheduler='pbs'))
+    assert pbs.query([JobId('1001.fakepbs'), JobId('77[].fakepbs')]) == {
+        '1001.fakepbs': JobStatus(JobState.UNKNOWN), '77[].fakepbs': JobStatus(JobState.UNKNOWN)}
+
+
+def test_fake_qstat_without_history(fake_pbs):
+    '''Like PBS, the fake qstat lists finished jobs only with -x'''
+    project_dir, _ = fake_pbs
+    assert main(['-C', str(project_dir), 'submit', '--all', 'one']) == 0
+    p = subprocess.run(['qstat', '-f', '-F', 'json', '1001.fakepbs', '5.fakepbs'],
+                       capture_output=True, text=True, check=False)
+    assert (p.returncode, p.stdout) == (153, '')
+    assert p.stderr.splitlines() == [
+        ('qstat: 1001.fakepbs Job has finished, use -x or -H to obtain historical job '
+         'information'),
+        'qstat: Unknown Job Id 5.fakepbs']

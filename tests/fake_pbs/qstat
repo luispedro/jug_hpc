@@ -1,0 +1,58 @@
+#!/bin/bash
+# A fake PBS qstat for the tests, serving the jobs of the fake qsub next to it.
+#
+# Usage: qstat -f -F json [-x] JOB_ID... (the only form jug_hpc uses). Each call
+# is logged to $FAKE_PBS_DIR/qstat.log (cwd, then the arguments, tab-separated).
+#
+# Prints {"timestamp":...,"pbs_version":...,"pbs_server":...,"Jobs":{...}} with
+# the entry the fake qsub left in $FAKE_PBS_DIR/jobs/<n>.qstat for each known
+# job, like PBS: jobs are found by number (the server part of an ID is
+# ignored), every job has ended (job_state F, with Exit_status for a plain job
+# and array_state_count for an array) unless qsub held it (job_state H), and
+# finished jobs are listed only with -x. For the other jobs, it prints PBS's
+# error messages to stderr and exits with PBS's status (153 for an unknown
+# job, 35 for a finished one without -x; the last error wins). If no job is
+# listed, it prints nothing on stdout.
+set -eu
+
+: "${FAKE_PBS_DIR:?FAKE_PBS_DIR is not set}"
+mkdir -p "$FAKE_PBS_DIR"
+(IFS=$'\t'; printf '%s\t%s\n' "$PWD" "$*") >>"$FAKE_PBS_DIR/qstat.log"
+
+if [ "${1-}" != -f ] || [ "${2-}" != -F ] || [ "${3-}" != json ]; then
+    echo "qstat (fake): expected -f -F json [-x] JOB_ID..., got: $*" >&2
+    exit 2
+fi
+shift 3
+history=
+if [ "${1-}" = -x ]; then
+    history=1
+    shift
+fi
+
+status=0
+entries=()
+for id; do
+    entry="$FAKE_PBS_DIR/jobs/${id%%[.[]*}.qstat"
+    if [ ! -f "$entry" ]; then
+        echo "qstat: Unknown Job Id $id" >&2
+        status=153
+    elif [ -z "$history" ] && grep -q '"job_state":"F"' "$entry"; then
+        echo "qstat: $id Job has finished, use -x or -H to obtain historical job information" >&2
+        status=35
+    else
+        entries+=("$(cat "$entry")")
+    fi
+done
+
+if [ "${#entries[@]}" -gt 0 ]; then
+    printf '{\n    "timestamp":%s,\n    "pbs_version":"fake",\n' "$(date +%s)"
+    printf '    "pbs_server":"fakepbs",\n    "Jobs":{\n'
+    sep=''
+    for e in "${entries[@]}"; do
+        printf '%s        %s' "$sep" "$e"
+        sep=$',\n'
+    done
+    printf '\n    }\n}\n'
+fi
+exit "$status"
