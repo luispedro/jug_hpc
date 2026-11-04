@@ -15,7 +15,9 @@ Current state: milestones 0–1 are done; milestone 2 is done in code (`schedule
 Milestone 3 has started: task counts per class (`jugstate.task_counts`,
 `classes.counts_by_class`, and `jugstate.subprocess_task_counts` for loading in a
 subprocess) and `Scheduler.query()` for PBS and local (a `JobStatus` per job, with
-queued/running worker counts) exist; the polling `submitter.py` does not.
+queued/running worker counts) exist, as do the submission rule and exit condition
+(pure functions in `submitter.py`); the polling loop and `jug-hpc submit` without
+`--all`/`--dry-run` do not.
 
 ## Commands
 
@@ -108,6 +110,10 @@ required because TOML is read with `tomllib`; Jug is the only runtime dependency
   `write_scripts` (saves scripts, creates `logs/scheduler/`), `submit_worker` (submit +
   record). Submit commands name the script relative to the project dir (their cwd), so
   `--dry-run` prints exactly what `--all` runs.
+- **`submitter.py`**: the polling submitter's decisions, pure (no I/O): which jobs to
+  query, active workers per class, `workers_to_submit` (`min(ready, workers) - active`),
+  and `progress` (keep polling / finished / blocked by failed tasks). The loop is not
+  written yet.
 - **`cli.py`**: argparse subcommands dispatched via the `COMMANDS` dict; command
   implementations import lazily. Listings go to stdout, `jug-hpc: error|warning|note: ...`
   to stderr. `-C DIR` sets where to start searching upward for `jug_hpc.toml`.

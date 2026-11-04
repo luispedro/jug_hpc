@@ -364,8 +364,22 @@ cluster and runs a one-class jugfile to completion. → **Release 0.1.**
    `wanted = min(ready, workers)`, `active = queued + running workers`,
    submit `wanted - active` new workers if positive. Running tasks hold a
    lock, so they aren't counted as ready.
+   - Done in `submitter.py` as pure functions: `jobs_to_query` (recorded
+     jobs of the current backend not yet settled), `is_settled` (finished, or
+     unknown and older than `SUBMIT_GRACE`), `active_workers` (sum of
+     `JobStatus.active` per class; a job reported unknown within
+     `SUBMIT_GRACE` = 300 s of submission counts all its workers, since a
+     scheduler may not list a job it has just accepted, and the next poll
+     would submit it again), `workers_to_submit` and `class_limits`.
 4. Exit when every task is finished, or when nothing is ready or running and
    only failed tasks remain (with a report).
+   - Done: `submitter.progress(by_class, hit_barrier)` → `ProgressReport`
+     (`RUNNING` / `FINISHED` / `BLOCKED`, with failed and waiting counts per
+     class). Workers still queued or running don't delay the exit (they end
+     by themselves). Waiting tasks with nothing ready, running or failed (an
+     inconsistent count) or a barrier with every known task finished mean
+     "poll again". A dead worker's lock keeps its task "running" forever, so
+     the submitter never exits until milestone 4 step 5 handles stale locks.
 5. `jug-hpc submit` runs the loop in the foreground; `--as-job` submits the
    loop itself as a small, long job (1 CPU, little memory). Only one
    submitter per project is allowed (a lock in `.jug_hpc/`).
