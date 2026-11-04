@@ -10,9 +10,9 @@ read `GOALS.md` (design, principles) and `PLAN.md` (architecture, milestones, de
 before making design-level changes. PLAN.md is the source of truth for what comes next.
 
 Current state: milestone 1 (`config`, `check`) is done; milestone 2 is in progress
-(`schedulers/base.py`, `schedulers/pbs.py`, `runner.py`, `worker.py`, `script.py`,
-`selection.py` exist; `schedulers/local.py`, `state.py`, `submitter.py` and `jug-hpc submit`
-do not yet).
+(`schedulers/base.py`, `schedulers/pbs.py`, `schedulers/checks.py`, `runner.py`, `worker.py`,
+`script.py`, `selection.py` exist; `schedulers/local.py`, `state.py`, `submitter.py` and
+`jug-hpc submit` do not yet).
 
 ## Commands
 
@@ -81,6 +81,10 @@ required because TOML is read with `tomllib`; Jug is the only runtime dependency
   everything scheduler-specific lives in one backend module, and backends keep pure functions
   (render script, build command, parse output — tested against recorded output) separate
   from side effects, which go only through a `Runner`.
+- **`schedulers/checks.py`**: `check_scheduler_settings(cluster, project)` collects errors
+  (unknown `scheduler`, raw tables rejected by their backend's `validate_raw_options`) and
+  warnings (tables naming no installed backend). Used by `jug-hpc config`; `check` does not
+  use it, as it never reads the cluster settings.
 - **`runner.py`**: `SubprocessRunner` for real use; `FakeRunner` records calls and replays
   canned output in tests. Backends never call `subprocess` directly.
 - **`cli.py`**: argparse subcommands dispatched via the `COMMANDS` dict; command

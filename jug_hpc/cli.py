@@ -72,6 +72,7 @@ def cmd_config(args, start):
         load_project_settings,
     )
     from .config.show import format_cluster_settings, format_project_settings
+    from .schedulers.checks import check_scheduler_settings
 
     status = 0
     project_dir = find_project_dir(start)
@@ -85,6 +86,7 @@ def cmd_config(args, start):
     else:
         sections.append(format_cluster_settings(cluster))
 
+    project = None
     if project_dir is None:
         sections.append(
             f'# Project settings: no {PROJECT_FILE} found in {start.absolute()} '
@@ -98,7 +100,17 @@ def cmd_config(args, start):
         else:
             sections.append(format_project_settings(project, cluster))
     if sections:
-        print('\n\n'.join(sections))
+        # flushed so that the listing comes before the messages when both
+        # streams go to the same file
+        print('\n\n'.join(sections), flush=True)
+
+    found = check_scheduler_settings(cluster, project)
+    for warning in found.warnings:
+        _message('warning', warning)
+    for error in found.errors:
+        _error(error)
+    if not found.ok:
+        status = 1
     return status
 
 

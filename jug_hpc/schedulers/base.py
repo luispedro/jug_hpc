@@ -149,11 +149,14 @@ class Scheduler(ABC):
             If the output is not understood
         '''
 
-    def validate_raw_options(self, raw, where):
+    @classmethod
+    def validate_raw_options(cls, raw, where):
         '''Check the shape of this scheduler's raw options
 
         Values are passed through unchecked; only the structure the backend
-        relies on is checked. The default accepts any table.
+        relies on is checked. The default accepts any table. A classmethod, so
+        that tables can be checked without cluster settings (e.g. those of a
+        project, for any installed backend).
 
         Parameters
         ----------

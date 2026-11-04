@@ -100,6 +100,35 @@ def test_config_shows_what_is_valid(config_env, capsys):
     assert 'jug_hpc.toml' in err
 
 
+def test_config_checks_scheduler_settings(config_env, capsys):
+    tmp_path, project = config_env
+    user = tmp_path / 'xdg' / 'jug_hpc' / 'cluster.toml'
+    user.write_text('scheduler = "pbs"\n[pbs.select]\nncpus = 2\n[pbz]\na = 1\n')
+    with (project / 'jug_hpc.toml').open('a') as f:
+        f.write('[class.big.pbs]\ndirectives = "-m n"\n')
+    assert main(['-C', str(project), 'config']) == 1
+    out, err = capsys.readouterr()
+    assert '[class.big]' in out     # everything is still shown
+    assert err.splitlines() == [
+        (f"jug-hpc: warning: {user}: [pbz] is ignored: no scheduler backend named 'pbz' "
+         "is installed (did you mean 'pbs'? available: pbs)"),
+        (f"jug-hpc: error: {user}: [pbs]: 'select.ncpus' cannot be set as a raw option: "
+         'use cpus in jug_hpc.toml'),
+        (f"jug-hpc: error: {project / 'jug_hpc.toml'}: [class.big.pbs]: 'directives' "
+         'must be a list of strings (qsub options)'),
+    ]
+
+
+def test_config_unknown_scheduler(config_env, capsys):
+    tmp_path, project = config_env
+    user = tmp_path / 'xdg' / 'jug_hpc' / 'cluster.toml'
+    user.write_text('scheduler = "slurmm"\n')
+    assert main(['-C', str(project), 'config']) == 1
+    out, err = capsys.readouterr()
+    assert 'scheduler = "slurmm"' in out
+    assert err.startswith(f"jug-hpc: error: {user}: unknown scheduler 'slurmm' (")
+
+
 def test_project_dir_must_exist(tmp_path, capsys):
     with pytest.raises(SystemExit) as e:
         main(['-C', str(tmp_path / 'missing'), 'config'])

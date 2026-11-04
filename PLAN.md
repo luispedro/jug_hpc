@@ -244,12 +244,16 @@ jugfiles and on test jugfiles with overlapping classes and barriers.
 
 Notes for the remaining steps:
 
-- Once a backend is registered (`[project.entry-points."jug_hpc.schedulers"]`
-  in pyproject.toml, then `uv sync`), validate the scheduler name in
-  cluster.toml and call `validate_raw_options` on `[pbs]`, `[default.pbs]` and
-  `[class.x.pbs]`, in `jug-hpc config` and in `submit`. Not before: with no
-  backend registered it would break `config`. `check` stays independent of
-  the cluster settings.
+- Scheduler settings are checked against the installed backends by
+  `schedulers/checks.py` (`check_scheduler_settings`), called by `jug-hpc
+  config` (done) and to be called by `submit` (raise the first error). An
+  unknown `scheduler` and invalid raw tables are errors; every table named
+  after an installed backend is checked (so a project's `[class.x.slurm]` is
+  checked on a PBS cluster when the slurm backend is installed); tables naming
+  no installed backend, and cluster.toml tables for a backend other than the
+  configured one, are warnings (ignored). `validate_raw_options` is a
+  classmethod, so project tables are checked without cluster settings.
+  `check` stays independent of the cluster settings.
 - PBS backend (`schedulers/pbs.py`, done; its docstring has the details): raw
   `select`/`resources` tables may not set `ncpus`/`mem`/`walltime`/`select`
   (those come from `cpus`/`memory`/`time`); `directives` entries get `#PBS `

@@ -263,7 +263,8 @@ class PBSScheduler(Scheduler):
     def parse_submit_output(self, stdout):
         return parse_job_id(stdout)
 
-    def validate_raw_options(self, raw, where):
+    @classmethod
+    def validate_raw_options(cls, raw, where):
         validate_raw_options(raw, where)
 
     def query(self, jobs):
