@@ -19,6 +19,7 @@ from .project import (
     PROJECT_KEYS,
     ProjectSettings,
     ResourceClass,
+    find_project_dir,
     load_project_settings,
 )
 
@@ -34,6 +35,7 @@ __all__ = [
     'ConfigError',
     'ProjectSettings',
     'ResourceClass',
+    'find_project_dir',
     'load_cluster_settings',
     'load_project_settings',
     'user_cluster_path',

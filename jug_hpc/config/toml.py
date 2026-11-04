@@ -4,6 +4,8 @@ A *source map* records, for every leaf value of a (merged) table, the file it
 came from. Leaves are all values except tables; arrays are leaves, so an array
 in an overriding file replaces the whole array.
 '''
+import datetime
+import math
 import tomllib
 from pathlib import Path
 
@@ -11,6 +13,7 @@ from .errors import ConfigError
 
 __all__ = [
     'format_key',
+    'format_value',
     'iter_leaves',
     'merge',
     'read_toml',
@@ -27,8 +30,68 @@ def _is_bare_key(k):
     return bool(k) and all(c.isascii() and (c.isalnum() or c in '-_') for c in k)
 
 
+_ESCAPES = {'"': '\\"', '\\': '\\\\', '\b': '\\b', '\t': '\\t', '\n': '\\n',
+            '\f': '\\f', '\r': '\\r'}
+
+
 def _quote(k):
-    return '"' + k.replace('\\', '\\\\').replace('"', '\\"') + '"'
+    '''Write a string as a TOML basic string (escaping what must be)'''
+    def escape(c):
+        if c in _ESCAPES:
+            return _ESCAPES[c]
+        if _is_control(c):
+            return f'\\u{ord(c):04x}'
+        return c
+    return '"' + ''.join(map(escape, k)) + '"'
+
+
+def format_value(v, *, multiline=False):
+    '''Format a value (as returned by :mod:`tomllib`) as TOML
+
+    Strings with backslashes (e.g., regular expressions) are written as
+    literal strings when they can be, so that they read as written. With
+    ``multiline``, a string with newlines is written as a multi-line literal
+    string (three single quotes) when it can be, so that shell code stays
+    readable; otherwise every value fits on one line.
+    '''
+    if isinstance(v, bool):
+        return 'true' if v else 'false'
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        if math.isnan(v):
+            return 'nan'
+        if math.isinf(v):
+            return 'inf' if v > 0 else '-inf'
+        return repr(v)
+    if isinstance(v, str):
+        if multiline and '\n' in v and _literal_ok(v):
+            return "'''\n" + v + "'''"
+        if '\\' in v and "'" not in v and not any(map(_is_control, v)):
+            return "'" + v + "'"
+        return _quote(v)
+    if isinstance(v, list):
+        return '[' + ', '.join(format_value(x) for x in v) + ']'
+    if isinstance(v, dict):
+        if not v:
+            return '{}'
+        return '{ ' + ', '.join(f'{format_key((k,))} = {format_value(x)}'
+                                for k, x in v.items()) + ' }'
+    if isinstance(v, datetime.date | datetime.time):
+        return v.isoformat()
+    raise TypeError(f'not a TOML value: {v!r}')
+
+
+def _literal_ok(s):
+    # A multi-line literal string cannot hold three single quotes or control characters
+    # other than tab and newline, and cannot end in a quote (it would merge
+    # with the closing delimiter)
+    return ("'''" not in s and not s.endswith("'")
+            and all(c in '\t\n' or not _is_control(c) for c in s))
+
+
+def _is_control(c):
+    return c < ' ' or c == '\x7f'
 
 
 def read_toml(path):

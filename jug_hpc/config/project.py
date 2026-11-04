@@ -37,6 +37,7 @@ __all__ = [
     'PROJECT_KEYS',
     'ProjectSettings',
     'ResourceClass',
+    'find_project_dir',
     'load_project_settings',
 ]
 
@@ -187,6 +188,27 @@ class ProjectSettings:
         if name == DEFAULT_CLASS:
             return self.default
         return self.classes[name]
+
+
+def find_project_dir(start):
+    '''The nearest directory holding ``jug_hpc.toml``: ``start`` or a parent
+
+    Parameters
+    ----------
+    start : path
+        Directory to start from (made absolute, but symbolic links are not
+        resolved, so that ``..`` follows the path as given)
+
+    Returns
+    -------
+    project_dir : Path or None
+        None if neither ``start`` nor any of its parents has the file
+    '''
+    start = Path(start).absolute()
+    for d in (start, *start.parents):
+        if (d / PROJECT_FILE).is_file():
+            return d
+    return None
 
 
 def load_project_settings(project_dir):

@@ -64,6 +64,10 @@ class ClusterSettings:
         Key tuple -> Path of the file each leaf value came from
     files : tuple of Path
         The files that were read, user file first
+    searched : tuple of Path
+        The files that were looked for, whether they exist or not: the user
+        file, then the project file (if there is a project and its
+        ``cluster.toml`` is not the user file)
     '''
     scheduler: str
     account: str | None = None
@@ -73,6 +77,7 @@ class ClusterSettings:
     data: dict = field(default_factory=dict)
     sources: dict = field(default_factory=dict)
     files: tuple = ()
+    searched: tuple = ()
 
     def raw_options(self, scheduler=None):
         '''Raw options for ``scheduler`` (default: the configured one)'''
@@ -111,9 +116,9 @@ def load_cluster_settings(project_dir, *, environ=None):
 
     Parameters
     ----------
-    project_dir : path
+    project_dir : path or None
         Directory holding ``jug_hpc.toml``; its ``cluster.toml``, if any,
-        overrides the user file.
+        overrides the user file. None to read only the user file.
     environ : mapping, optional
         Environment used to find the user file (default: ``os.environ``)
 
@@ -126,12 +131,13 @@ def load_cluster_settings(project_dir, *, environ=None):
     ConfigError
     '''
     user_path = user_cluster_path(environ)
-    project_path = Path(project_dir) / CLUSTER_FILE
+    paths = [user_path]
+    if project_dir is not None:
+        project_path = Path(project_dir) / CLUSTER_FILE
+        if not _same_file(user_path, project_path):
+            paths.append(project_path)
 
     data, sources, files = {}, {}, []
-    paths = [user_path]
-    if not _same_file(user_path, project_path):
-        paths.append(project_path)
     for path in paths:
         content = read_toml(path)
         if content is None:
@@ -140,12 +146,14 @@ def load_cluster_settings(project_dir, *, environ=None):
         files.append(path)
 
     if not files:
+        looked = [f'  {user_path} (user settings; set XDG_CONFIG_HOME to change)']
+        if len(paths) > 1:
+            looked.append(f'  {paths[1]} (project settings)')
         raise ConfigError(
             'no cluster settings found: create a cluster.toml naming at least '
             'the scheduler (e.g. scheduler = "pbs"). Looked for:\n'
-            f'  {user_path} (user settings; set XDG_CONFIG_HOME to change)\n'
-            f'  {project_path} (project settings)')
-    return _validate(data, sources, tuple(files))
+            + '\n'.join(looked))
+    return _validate(data, sources, tuple(files), tuple(paths))
 
 
 def _same_file(a, b):
@@ -155,7 +163,7 @@ def _same_file(a, b):
         return False
 
 
-def _validate(data, sources, files):
+def _validate(data, sources, files, searched):
     def where(key):
         return sources.get(key) or ' and '.join(map(str, files))
 
@@ -184,7 +192,8 @@ def _validate(data, sources, files):
         raise ConfigError(
             f'no scheduler set in {" or ".join(map(str, files))}: add, e.g., '
             f'scheduler = "pbs"')
-    return ClusterSettings(raw=raw, data=data, sources=sources, files=files, **values)
+    return ClusterSettings(raw=raw, data=data, sources=sources, files=files,
+                           searched=searched, **values)
 
 
 def _table_source(sources, key, files):
