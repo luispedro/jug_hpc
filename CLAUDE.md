@@ -19,8 +19,8 @@ queued/running worker counts), the submission rule and exit condition (pure func
 `submitter.py`), and the polling loop (`poll.py`, plain `jug-hpc submit`, with a
 per-project lock), with end-to-end tests on the local backend (chain, three-class chain,
 barrier, workers stopped by `JUG_MAX_SECONDS`, failed task), and `submit --as-job` (the
-submitter as a job, sized by `[submitter]` in `jug_hpc.toml`). Not yet: backoff, Jug's
-status cache.
+submitter as a job, sized by `[submitter]` in `jug_hpc.toml`), and backoff while nothing
+changes (`--max-interval`). Jug's status cache is deliberately not used (PLAN.md).
 
 ## Commands
 
@@ -130,8 +130,9 @@ paths replaced by `/home/me/rnaseq`.
 - **`poll.py`**: the loop around them. `Submitter.poll()` does one poll (counts in a
   subprocess, `query`, submissions via `submit.prepare_class`/`write_script`/
   `submit_worker`); the only state kept between polls is the set of settled job IDs.
-  `run()` repeats it; first-poll errors are fatal, later `SchedulerError`/`JugfileError`
-  are retried (`MAX_FAILED_POLLS`). `cli._poll` holds `ProjectState.submitter_lock()`.
+  `run()` repeats it, doubling the wait while nothing changes (up to `max_interval`);
+  first-poll errors are fatal, later `SchedulerError`/`JugfileError` are retried
+  (`MAX_FAILED_POLLS`). `cli._poll` holds `ProjectState.submitter_lock()`.
   `cli._submit_as_job` submits the loop itself as a job (`worker.make_submitter_spec`,
   `submit.prepare_submitter`, `script.submitter_command`) after checking for an active
   submitter job (`submitter.active_submitter_jobs`) and the lock.

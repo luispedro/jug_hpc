@@ -67,11 +67,21 @@ def build_parser():
         '--interval', type=_positive_seconds, metavar='SECONDS', default=None,
         help='seconds between polls (default: 60)')
     submit.add_argument(
+        '--max-interval', type=_positive_seconds, metavar='SECONDS', default=None,
+        help='longest wait between polls: while nothing changes, the wait doubles '
+             'after each poll, up to this (default: 5 times --interval)')
+    submit.add_argument(
         'classes', nargs='*', metavar='CLASS',
         help="with --all or --dry-run: only these classes ('default' for the "
              'default class); a class named here is submitted even if it has '
              'no tasks')
     return parser
+
+
+def _interval(args):
+    '''Seconds between polls: ``--interval``, or the default'''
+    from .poll import POLL_INTERVAL
+    return args.interval if args.interval is not None else POLL_INTERVAL
 
 
 def _positive_seconds(text):
@@ -91,6 +101,11 @@ def main(argv=None):
         if args.all or args.dry_run:
             if args.interval is not None:
                 parser.error('--interval: only without --all and --dry-run')
+            if args.max_interval is not None:
+                parser.error('--max-interval: only without --all and --dry-run')
+        elif args.max_interval is not None and args.max_interval < _interval(args):
+            parser.error(f'--max-interval ({args.max_interval:g} s) is less than '
+                         f'--interval ({_interval(args):g} s)')
         elif args.classes:
             parser.error('CLASS: only with --all or --dry-run (the submitter '
                          'polls every class)')
@@ -286,7 +301,7 @@ def _poll(args, start):
         load_project_settings,
     )
     from .jugstate import JugfileError
-    from .poll import POLL_INTERVAL, Submitter, run
+    from .poll import Submitter, run
     from .schedulers.base import SchedulerError, create_scheduler
     from .state import ProjectState, StateError
 
@@ -295,7 +310,7 @@ def _poll(args, start):
         _error(f'no {PROJECT_FILE} found in {start.absolute()} or any parent '
                'directory')
         return 1
-    interval = args.interval if args.interval is not None else POLL_INTERVAL
+    interval = _interval(args)
     last = [None]
 
     def on_poll(result):
@@ -322,8 +337,8 @@ def _poll(args, start):
         for warning in submitter.warnings:
             _message('warning', warning)
         with project_state.submitter_lock():
-            result = run(submitter, interval=interval, on_poll=on_poll,
-                         on_failure=on_failure)
+            result = run(submitter, interval=interval, max_interval=args.max_interval,
+                         on_poll=on_poll, on_failure=on_failure)
     except (ConfigError, SchedulerError, StateError) as e:
         _error(e)
         return 1
@@ -375,7 +390,7 @@ def _submit_as_job(args, start):
         load_project_settings,
     )
     from .jugstate import JugfileError, project_task_counts
-    from .poll import POLL_INTERVAL, Submitter
+    from .poll import Submitter
     from .schedulers.base import SchedulerError, create_scheduler
     from .state import ProjectState, StateError
     from .submit import prepare_submitter, submit_worker, write_script
@@ -386,7 +401,7 @@ def _submit_as_job(args, start):
         _error(f'no {PROJECT_FILE} found in {start.absolute()} or any parent '
                'directory')
         return 1
-    interval = args.interval if args.interval is not None else POLL_INTERVAL
+    interval = _interval(args)
     try:
         cluster = load_cluster_settings(project_dir)
         project = load_project_settings(project_dir)
@@ -395,7 +410,8 @@ def _submit_as_job(args, start):
         submitter = Submitter(cluster, project, scheduler, project_state)
         for warning in submitter.warnings:
             _message('warning', warning)
-        prepared = prepare_submitter(cluster, project, scheduler, interval=interval)
+        prepared = prepare_submitter(cluster, project, scheduler, interval=interval,
+                                     max_interval=args.max_interval)
 
         jobs = submitter_jobs(project_state.jobs(), scheduler.name)
         statuses = scheduler.query([r.job_id for r in jobs]) if jobs else {}

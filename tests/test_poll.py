@@ -306,6 +306,68 @@ def test_run_until_finished(setup):
     assert sleeps == [7, 7]
 
 
+def test_run_backs_off_while_nothing_changes(setup):
+    submitter, counts, sched, _state, _ = setup
+    counts.set(LOAD, ready=3, waiting=1)
+    polls = []
+    sleeps = []
+
+    def on_poll(result):
+        polls.append(submitted(result))
+        n = len(polls)
+        if n == 7:
+            counts.set(LOAD, running=3, waiting=1)      # the workers start
+        elif n == 9:
+            sched.finish_all()                          # ... and end
+            counts.set(LOAD, finished=4)
+
+    r = run(submitter, interval=10, max_interval=45, on_poll=on_poll, sleep=sleeps.append)
+    assert r.report.progress is Progress.FINISHED
+    assert polls[0] == [('default', 3)]
+    # 1: submitted; 2: workers now active; 3-7: no change; 8: running;
+    # 9: no change; 10: finished
+    assert sleeps == [10, 10, 20, 40, 45, 45, 45, 10, 20]
+
+
+def test_run_backoff_reset_by_failure(setup):
+    submitter, counts, sched, _state, _ = setup
+    counts.set(LOAD, ready=1)
+    polls = []
+    sleeps = []
+
+    def on_poll(result):
+        polls.append(submitted(result))
+        if len(polls) == 4:
+            sched.fail_query = 1        # the next poll fails
+        elif len(polls) == 6:
+            counts.set(LOAD, finished=1)
+
+    failures = []
+    r = run(submitter, interval=1, on_poll=on_poll, on_failure=failures.append,
+            sleep=sleeps.append)
+    assert r.report.progress is Progress.FINISHED
+    assert len(failures) == 1
+    # polls 1-4, a failed poll, and polls 5-6 (the first after a failure sees
+    # nothing to compare with); the default longest wait is 5 intervals
+    assert sleeps == [1, 1, 2, 4, 1, 1, 2]
+
+
+def test_run_without_backoff(setup):
+    submitter, counts, _sched, _state, _ = setup
+    counts.set(LOAD, ready=1)
+    sleeps = []
+
+    def on_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 4:
+            counts.set(LOAD, finished=1)
+
+    run(submitter, interval=3, max_interval=3, sleep=on_sleep)
+    assert sleeps == [3, 3, 3, 3]
+    with pytest.raises(ValueError, match='max_interval'):
+        run(submitter, interval=3, max_interval=2, sleep=pytest.fail)
+
+
 def test_run_until_blocked(setup):
     submitter, counts, _sched, _state, _ = setup
     counts.set(LOAD, failed=3)
@@ -443,6 +505,15 @@ def test_cli_submit_arguments(capsys):
     with pytest.raises(SystemExit):
         main(['submit', '--interval=0'])
     assert 'must be positive' in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        main(['submit', '--dry-run', '--max-interval=300'])
+    assert '--max-interval: only without --all' in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        main(['submit', '--max-interval=30'])
+    assert '--max-interval (30 s) is less than --interval (60 s)' in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        main(['submit', '--as-job', '--interval=10', '--max-interval=5'])
+    assert '--max-interval (5 s) is less than --interval (10 s)' in capsys.readouterr().err
 
 
 def test_cli_submit_locked(tmp_path, monkeypatch, capsys, project):
@@ -753,7 +824,8 @@ AS_JOB_PROJECT = LOCAL_PROJECT + '[submitter]\ntime = "1h"\n'
 def test_cli_submit_as_job(tmp_path, monkeypatch, capsys):
     '''The submitter runs as a job, and runs the jugfile to the end'''
     project_dir, sched = local_project(tmp_path, monkeypatch, DOUBLE, AS_JOB_PROJECT)
-    status = main(['-C', str(project_dir), 'submit', '--as-job', '--interval=0.2'])
+    status = main(['-C', str(project_dir), 'submit', '--as-job', '--interval=0.2',
+                   '--max-interval=0.4'])
     out, err = capsys.readouterr()
     assert status == 0, err
     assert err == ''
@@ -762,7 +834,7 @@ def test_cli_submit_as_job(tmp_path, monkeypatch, capsys):
     [record] = ProjectState(project_dir).jobs()
     assert (record.job_id, record.class_name, record.workers) == ('1', 'submitter', 1)
     script = (project_dir / '.jug_hpc' / 'scripts' / 'submitter-1.sh').read_text()
-    assert 'exec jug-hpc submit --interval=0.2\n' in script
+    assert 'exec jug-hpc submit --interval=0.2 --max-interval=0.4\n' in script
     assert 'JUG_MAX' not in script
 
     # a second submitter job is refused while the first is queued or running

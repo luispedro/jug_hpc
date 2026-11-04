@@ -180,7 +180,7 @@ $ jug-hpc submit
 (This run used the {ref}`local backend <local-backend>` with tasks that take
 no time, so it is much faster than a real run.)
 
-`jug-hpc submit` is the *polling submitter*. Once a minute, it counts the tasks
+`jug-hpc submit` is the *polling submitter*. Every minute or so, it counts the tasks
 of each class that are ready to run and submits workers for them, up to each
 class's `workers`. It keeps going until every task is finished, or until no
 task can run because some have failed. It is a small process that sleeps most

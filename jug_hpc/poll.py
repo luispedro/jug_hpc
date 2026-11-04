@@ -11,6 +11,22 @@ known to have ended (so they are not queried again); everything else is read
 again at each poll, from the jugfile's store and ``.jug_hpc/jobs.json``, so a
 submitter can be stopped and started again at any time.
 
+:func:`run` backs off while nothing changes: after a poll that finds the same
+task counts and active workers as the one before and submits nothing, the wait
+doubles, up to ``max_interval`` (default: :data:`MAX_INTERVAL_FACTOR` times
+the interval). Any change, and any failed poll, brings it back to the
+interval. This keeps the submitter cheap (each poll loads the jugfile and runs
+``qstat``) during the long stretches when workers are busy, while
+``max_interval`` bounds how late it notices tasks that became ready.
+
+Jug's status cache (``jug status --cache``) is not used: it is fast because
+it does not load the jugfile again, so it would miss the tasks created after a
+``barrier()`` and the changes to the jugfile. Measured on a jugfile with 100k
+tasks, a poll takes about 2 s and 150 MB, almost all of it hashing the tasks to
+build the dependency graph, which only loading the jugfile can do.
+(Without numpy installed, Jug 2.7's hashing tries to import numpy for every
+task, which made the same poll take 14 s.)
+
 Errors at the first poll are raised at once: they are most likely a problem
 with the settings or the jugfile. Later, a poll that fails because the
 scheduler or the jugfile could not be read (a ``SchedulerError`` or
@@ -38,6 +54,7 @@ from .submitter import (
 
 __all__ = [
     'MAX_FAILED_POLLS',
+    'MAX_INTERVAL_FACTOR',
     'POLL_INTERVAL',
     'PollResult',
     'Submitter',
@@ -46,6 +63,9 @@ __all__ = [
 
 #: Default seconds between polls
 POLL_INTERVAL = 60
+
+#: Default longest wait between polls, as a multiple of the interval
+MAX_INTERVAL_FACTOR = 5
 
 #: Polls in a row that may fail (after the first) before :func:`run` gives up
 MAX_FAILED_POLLS = 5
@@ -183,20 +203,26 @@ class Submitter:
         return result
 
 
-def run(submitter, *, interval=POLL_INTERVAL, on_poll=None, on_failure=None,
-        max_failed=MAX_FAILED_POLLS, sleep=time.sleep):
+def run(submitter, *, interval=POLL_INTERVAL, max_interval=None, on_poll=None,
+        on_failure=None, max_failed=MAX_FAILED_POLLS, sleep=time.sleep):
     '''Poll until every task is finished or no task can run
 
     Parameters
     ----------
     submitter : Submitter
     interval : float, optional
-        Seconds between polls
+        Seconds between polls while something changes
+    max_interval : float, optional
+        Longest wait between polls while nothing changes (default:
+        :data:`MAX_INTERVAL_FACTOR` × ``interval``); the wait doubles after
+        each poll that changes nothing. Equal to ``interval``, there is no
+        backoff.
     on_poll : callable, optional
         Called with the :class:`PollResult` of every poll that counted the
         tasks (also those where a submission failed)
     on_failure : callable, optional
-        Called with the exception of a failed poll that will be retried
+        Called with the exception of a failed poll that will be retried (the
+        next poll is ``interval`` seconds later)
     max_failed : int, optional
         Polls in a row that may fail before giving up (the first poll may not)
     sleep : callable, optional
@@ -216,8 +242,15 @@ def run(submitter, *, interval=POLL_INTERVAL, on_poll=None, on_failure=None,
     ConfigError, StateError
         As soon as a poll raises one
     '''
+    if max_interval is None:
+        max_interval = MAX_INTERVAL_FACTOR * interval
+    if max_interval < interval:
+        raise ValueError(f'max_interval ({max_interval:g}) is less than interval '
+                         f'({interval:g})')
     failed = 0
     first = True
+    wait = interval
+    seen = None
     while True:
         try:
             result = submitter.poll()
@@ -231,11 +264,22 @@ def run(submitter, *, interval=POLL_INTERVAL, on_poll=None, on_failure=None,
                 if result.report.progress is not Progress.RUNNING:
                     return result
                 failed = 0
+                now_seen = _seen(result)
+                wait = (min(2 * wait, max_interval)
+                        if now_seen == seen and not result.submitted else interval)
+                seen = now_seen
         if error is not None:
             failed += 1
             if first or failed > max_failed:
                 raise error
             if on_failure is not None:
                 on_failure(error)
+            wait = interval
+            seen = None
         first = False
-        sleep(interval)
+        sleep(wait)
+
+
+def _seen(result):
+    '''What a poll found that, when it changes, resets the backoff'''
+    return (result.by_class, result.hit_barrier, result.active)

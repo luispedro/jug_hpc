@@ -235,7 +235,8 @@ def prepare_class(cluster, project, rc, scheduler, *, workers, tasks, task_names
     return PreparedWorker(rc.name, tasks, spec, scheduler.render_script(spec))
 
 
-def prepare_submitter(cluster, project, scheduler, *, interval, jug_hpc='jug-hpc'):
+def prepare_submitter(cluster, project, scheduler, *, interval, max_interval=None,
+                      jug_hpc='jug-hpc'):
     '''Build the submitter job (``jug-hpc submit --as-job``)
 
     Parameters
@@ -245,6 +246,8 @@ def prepare_submitter(cluster, project, scheduler, *, interval, jug_hpc='jug-hpc
     scheduler : Scheduler
     interval : float
         Seconds between polls
+    max_interval : float, optional
+        Longest wait between polls (see :func:`~jug_hpc.script.submitter_command`)
     jug_hpc : str, optional
         The ``jug-hpc`` executable in the script
 
@@ -261,7 +264,8 @@ def prepare_submitter(cluster, project, scheduler, *, interval, jug_hpc='jug-hpc
     SchedulerError
         If the script cannot be rendered
     '''
-    spec = make_submitter_spec(cluster, project, submitter_command(interval, jug_hpc=jug_hpc))
+    command = submitter_command(interval, max_interval, jug_hpc=jug_hpc)
+    spec = make_submitter_spec(cluster, project, command)
     return PreparedWorker(SUBMITTER, 0, spec, scheduler.render_script(spec))
 
 

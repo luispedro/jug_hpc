@@ -17,7 +17,8 @@ body rendered here::
 
 The submitter job (``jug-hpc submit --as-job``) has the same script, with
 ``class`` ``submitter``, no ``JUG_MAX_*`` lines, and ``exec jug-hpc submit
---interval=<seconds>`` as its command (:func:`submitter_command`).
+--interval=<seconds> [--max-interval=<seconds>]`` as its command
+(:func:`submitter_command`).
 
 Choices made here:
 
@@ -144,7 +145,7 @@ def jug_execute_command(project, rc, *, jug='jug', exclude=None, task_names=None
     )
 
 
-def submitter_command(interval, *, jug_hpc='jug-hpc'):
+def submitter_command(interval, max_interval=None, *, jug_hpc='jug-hpc'):
     '''The command line of the submitter job: ``jug-hpc submit --interval=<s>``
 
     The job starts in the project directory, so no ``-C`` is needed.
@@ -153,6 +154,9 @@ def submitter_command(interval, *, jug_hpc='jug-hpc'):
     ----------
     interval : float
         Seconds between polls
+    max_interval : float, optional
+        Longest wait between polls (default: none given, so the job uses the
+        default for ``interval``)
     jug_hpc : str, optional
         The ``jug-hpc`` executable (found on ``PATH`` after the setup snippets)
 
@@ -160,7 +164,10 @@ def submitter_command(interval, *, jug_hpc='jug-hpc'):
     -------
     argv : tuple of str
     '''
-    return (jug_hpc, 'submit', f'--interval={interval:g}')
+    argv = (jug_hpc, 'submit', f'--interval={interval:g}')
+    if max_interval is not None:
+        argv += (f'--max-interval={max_interval:g}',)
+    return argv
 
 
 def log_path(spec):

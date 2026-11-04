@@ -273,6 +273,8 @@ def test_submitter_command():
     assert submitter_command(60) == ('jug-hpc', 'submit', '--interval=60')
     assert submitter_command(0.5, jug_hpc='/opt/bin/jug-hpc') == \
         ('/opt/bin/jug-hpc', 'submit', '--interval=0.5')
+    assert submitter_command(60, 300) == \
+        ('jug-hpc', 'submit', '--interval=60', '--max-interval=300')
 
 
 def test_body_submitter(tmp_path):

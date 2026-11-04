@@ -25,7 +25,8 @@ tasks of different classes may alternate, and new tasks may appear after a
 ## The polling submitter
 
 `jug-hpc submit` polls every 60 seconds (change this with `--interval
-SECONDS`). At each poll it:
+SECONDS`), and less often while nothing changes (see [How often it
+polls](#how-often-it-polls)). At each poll it:
 
 1. loads the jugfile in a separate process and counts, per class, the tasks
    that are waiting, ready, running, failed and finished (the numbers of
@@ -61,6 +62,26 @@ It stops:
 
 Workers that are still queued or running when the submitter stops are left
 alone: a worker with nothing to do exits by itself after a few minutes.
+
+### How often it polls
+
+Each poll loads the jugfile and queries the scheduler, so the submitter backs
+off while nothing changes. After a poll that finds the same task counts and
+the same workers queued or running as the one before, and submits nothing, it
+waits twice as long as the last time, up to `--max-interval SECONDS` (default:
+5 times `--interval`, so 5 minutes). Any change, or a poll that fails, brings
+the wait back to `--interval`.
+
+During long stretches where the workers are busy with long tasks, it therefore
+polls every 5 minutes. `--max-interval` is also the longest time it can take to
+notice that tasks have become ready and submit workers for them. Set it to the
+same value as `--interval` to poll at a fixed interval.
+
+Loading a jugfile with 100,000 tasks takes about 2 seconds and 150 MB of memory
+(most of it is computing the hashes of the tasks, as `jug status` does). Jug's
+own status cache (`jug status --cache`) is not used, because it does not load
+the jugfile again, so it would miss tasks created after a `barrier()` and your
+changes to the jugfile.
 
 ### Stopping and restarting
 
@@ -224,5 +245,5 @@ jug_hpc is in early development. In particular:
   fails, the submitter submits new workers at every poll. Look at
   `logs/scheduler/` and the worker logs when a class's workers keep being
   submitted.
-- The submitter polls at a fixed interval and loads the jugfile at every poll.
-  For very large jugfiles, use a longer `--interval`.
+- The submitter loads the jugfile at every poll. For jugfiles with millions of
+  tasks, use a longer `--interval` and `--max-interval`.

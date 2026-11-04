@@ -159,6 +159,14 @@ detects them and falls back to the regex otherwise) and `jug status --json`
 linecache `DeprecationWarning` (Jug's jugfile module has no `__spec__`);
 `jugstate.py` suppresses it.
 
+Performance, for Jug: `jug.hash.hash_update` runs `import numpy` on every
+call, and a failed import is not cached, so without numpy installed each call
+searches all of `sys.path`. Loading a 100k-task jugfile without numpy took
+14 s instead of 2 s, and `jug execute`/`jug status` pay the same cost. Fix:
+look numpy up once (e.g. at module level, or `sys.modules.get('numpy')`,
+since an array argument means numpy is already imported). Not yet done in
+`../jug`.
+
 ## Milestones and steps
 
 ### Milestone 0: project skeleton — done, except CI
@@ -183,9 +191,9 @@ cluster and runs a one-class jugfile to completion. → **Release 0.1.**
 
 ### Milestone 3: the polling submitter
 
-Steps 1–5 and 7 are done (task counts per class, `query()`, the submission
-rule, the exit condition, `jug-hpc submit` and `--as-job`, end-to-end tests on
-the local backend).
+Steps 1–7 are done (task counts per class, `query()`, the submission rule,
+the exit condition, `jug-hpc submit` and `--as-job`, backoff, end-to-end tests
+on the local backend).
 Decisions taken there that later steps depend on:
 
 - **The submitter loads the jugfile in a subprocess** on each poll
@@ -208,14 +216,23 @@ Decisions taken there that later steps depend on:
 - The `--as-job` submitter job's resources are a `[submitter]` table in
   `jug_hpc.toml`; nothing is inherited from `[default]`, and `submitter` is a
   reserved class name.
+- Poll cost, measured on 2026-11-05 with a 100,001-task jugfile (two
+  50k-task `TaskGenerator`s and a reduction): about 2 s and 150 MB per poll,
+  whether no task or every task is finished. About 85% of that is hashing the
+  tasks to build the dependency graph; checking the store is about 5%.
+- **Jug's status cache is not used.** It is fast only because it does not
+  load the jugfile again, so it would miss tasks created after a `barrier()`
+  and edits to the jugfile; the hashing, which is the cost, needs the
+  jugfile loaded. If polls get too slow, cache hashes keyed by something
+  cheaper (not planned).
+- **Backoff** (`poll.run`): after a poll with the same counts, the same
+  active workers and no submission, the wait doubles, up to `--max-interval`
+  (default 5 × `--interval`); any change or failed poll resets it. The
+  maximum bounds how late newly ready tasks are noticed.
 
 Remaining:
 
-6. Poll interval: configurable (done, `--interval`, default 60 s), with
-   backoff when nothing changes. Use Jug's status cache so a poll stays cheap
-   for large graphs; measure on a jugfile with 100k tasks (each poll runs a
-   subprocess that loads the jugfile).
-7. Open questions:
+6. Open questions:
    - A submitter job that reaches its wall time is killed (workers keep
      running; the user submits again). It could resubmit itself before then;
      it would have to release the lock first, and the new job wait briefly
@@ -223,7 +240,7 @@ Remaining:
    - Should `submit --all` refuse to run while the submitter lock is held?
      (It does not take the lock now.)
    - Show the jugfile's own output (`PollResult.output`) on the first poll?
-8. To check on a real PBS cluster (with milestone 2's test):
+7. To check on a real PBS cluster (with milestone 2's test):
    - record real `qstat -f -F json -x` output (plain job and array; queued,
      running and finished; an unknown ID) into `tests/pbs_output/`, replacing
      `qstat-f-json.json`, which is modelled on OpenPBS 23, not recorded. Check
@@ -336,8 +353,8 @@ exceeds its wall time produces a correct per-class report on PBS. →
 ## Risks
 
 - **Polling cost on large graphs.** Loading a jugfile with many tasks on every
-  poll may be slow. Mitigation: Jug's status cache, backoff, and measuring
-  early (milestone 3, step 6).
+  poll may be slow. Measured: about 2 s for 100k tasks; mitigated by backoff
+  (milestone 3).
 - **PBS variants.** PBS Pro, OpenPBS and Torque differ in arrays, `qstat`
   output and exit codes. Mitigation: target OpenPBS/PBS Pro only, keep all
   parsing in pure functions with recorded fixtures from each site we test on.
