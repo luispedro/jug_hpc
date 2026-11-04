@@ -28,6 +28,15 @@ CI (`.github/workflows/test.yml`) runs `uv sync --locked`, ruff, pytest on Pytho
 and `jug-hpc --version`. Keep `uv.lock` in sync when changing dependencies. Python ≥ 3.11 is
 required because TOML is read with `tomllib`; Jug is the only runtime dependency.
 
+- Dev tools (pytest, ruff, hypothesis) are in `[dependency-groups] dev`, so plain `uv sync`
+  installs them. The locked ruff also enforces import sorting (I001) and sorted `__all__`
+  (RUF022): run `uv run ruff check --fix .` before committing.
+- Other Pythons through uv: `uv run --python 3.11 --isolated pytest`.
+- A sibling Jug checkout lives at `../jug` (newer than PyPI's 2.7.0). One test (the
+  `--exclude-*` one) is skipped with released Jug; run it with
+  `uv run --isolated --with ../jug pytest`. Jug's examples (`../jug/examples`) are useful
+  for trying `check` by hand (they need `--with numpy --with requests`).
+
 ## Design principles that constrain code
 
 1. **The jugfile stays unchanged.** All scheduling info lives in TOML config; config files

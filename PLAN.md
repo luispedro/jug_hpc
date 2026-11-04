@@ -101,16 +101,22 @@ environment variables (job ID, array index, allocated CPUs):
 ```sh
 #!/bin/bash
 #PBS ...                                  # backend-specific header
-exec >"$LOG" 2>&1                         # logs/<class>-<jobid>.log, written live
-set -eu
-<cluster setup>
+set -e                                    # not -u: conda/module scripts use unset vars
+cd -- <workdir>
+JUG_HPC_JOB_ID="<backend expression>"
+mkdir -p -- <logs>
+exec >><logs>/<class>-"$JUG_HPC_JOB_ID".log 2>&1   # append, written live
+export JUG_HPC_CLASS=<class> JUG_HPC_JOB_ID JUG_HPC_CPUS=<cpus> OMP_NUM_THREADS=<cpus>
+<cluster setup>                           # after the CPU variables: may override them
 <project setup>
-unset JUG_MAX_HOURS JUG_MAX_MINUTES
+unset JUG_MAX_HOURS JUG_MAX_MINUTES       # after setup: nothing changes the limit
 export JUG_MAX_SECONDS=<floor(time_fraction * time)>
-export OMP_NUM_THREADS=<cpus> JUG_HPC_CPUS=<cpus> JUG_HPC_CLASS=<class>
-exec jug execute --name '<selector>' --nr-wait-cycles <n> --wait-cycle-time <t> \
-     --jugdir '<jugdir>' '<jugfile>'
+exec jug execute --name=<selector> --nr-wait-cycles=15 --wait-cycle-time=12 \
+     --jugdir=<jugdir> -- <jugfile>
 ```
+
+(As implemented in `script.py`, whose docstring explains the choices. The
+jugdir is always passed explicitly because Jug's jugrc files are ignored.)
 
 The worker redirects its own output so that log names are the same on every
 scheduler and logs are readable while the job runs (PBS otherwise spools
@@ -167,6 +173,13 @@ not yet available:
 Both are small and independent of jug_hpc, and they go into the next Jug
 release. Until then, `jugstate.py` calls the internal functions directly and
 pins the Jug version it was tested with.
+
+Status: both are on the sibling `../jug` checkout's main branch but not yet released
+(PyPI has 2.7.0): `--exclude-name`/`--exclude-pattern` (f7df6cb; `selection.py`
+detects them and falls back to the regex otherwise) and `jug status --json`
+(2b295c0). Minor, also for Jug: formatting a jugfile traceback raises a
+linecache `DeprecationWarning` (Jug's jugfile module has no `__spec__`);
+`jugstate.py` suppresses it.
 
 ## Milestones and steps
 
@@ -229,6 +242,27 @@ jugfiles and on test jugfiles with overlapping classes and barriers.
 9. Tests against a fake `qsub`/`qstat` (shell scripts on `PATH` replaying
    recorded output), plus a manual test on a real PBS cluster.
 
+Notes for the remaining steps:
+
+- Once a backend is registered (`[project.entry-points."jug_hpc.schedulers"]`
+  in pyproject.toml, then `uv sync`), validate the scheduler name in
+  cluster.toml and call `validate_raw_options` on `[pbs]`, `[default.pbs]` and
+  `[class.x.pbs]`, in `jug-hpc config` and in `submit`. Not before: with no
+  backend registered it would break `config`. `check` stays independent of
+  the cluster settings.
+- PBS `validate_raw_options`: only `select`/`resources` tables and a
+  `directives` list of strings.
+- PBS `ScriptVars`: job ID probably `${PBS_JOBID%%.*}`; decide what array
+  jobs give (`1234[2].server`; maybe `PBS_ARRAY_ID`), index `$PBS_ARRAY_INDEX`.
+- `submit` must create `logs/` and `logs/scheduler/` before `qsub` (the
+  script's `mkdir -p` is too late for PBS's own `-o`/`-e`).
+- `submit` should pass the jugfile's task names to `selector_args`, so the
+  fallback exclusion regex for the default class is checked against the
+  classifier.
+- `submit` should reject `dict_store` and `dict_store:<file>` jugdirs (they
+  can't be shared by concurrent workers); `check` should warn about them
+  (see milestone 4, step 6).
+
 **Done when:** `--dry-run` output can be submitted by hand on a real PBS
 cluster and runs a one-class jugfile to completion. → **Release 0.1.**
 
@@ -237,7 +271,11 @@ cluster and runs a one-class jugfile to completion. → **Release 0.1.**
 1. `jugstate.py`: per-class counts of ready/running/waiting/failed tasks
    (through the Jug API from "Changes needed in Jug", or the internal
    functions until it exists). Reload the jugfile on each poll, so tasks that
-   appear after a `barrier()` are seen.
+   appear after a `barrier()` are seen. Note: modules the jugfile imports
+   (e.g. a `helper.py` next to it) stay cached in `sys.modules`, so changes
+   to them are not seen on reload unless loading happens in a subprocess;
+   decide which. `Task.store` is restored after loading, so use
+   `t.can_load(state.store)`.
 2. `query()` in the PBS backend: queued/running/finished per job and array
    element, from `qstat -f -F json`.
 3. The submission rule, per class, at each poll:
