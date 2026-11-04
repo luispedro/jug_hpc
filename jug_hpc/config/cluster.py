@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .errors import ConfigError
-from .toml import format_key, iter_leaves, merge, read_toml
+from .toml import format_key, iter_leaves, merge, read_toml, toml_type
 
 __all__ = [
     'CLUSTER_FILE',
@@ -175,7 +175,7 @@ def _validate(data, sources, files):
                               f'{_suggestion(k, CLUSTER_KEYS)}')
         if not isinstance(v, str):
             raise ConfigError(
-                f'{where(key)}: {k!r} must be a string, not {_toml_type(v)} ({v!r})')
+                f'{where(key)}: {k!r} must be a string, not {toml_type(v)} ({v!r})')
         if k != 'setup' and not v.strip():
             raise ConfigError(f'{where(key)}: {k!r} must not be empty')
         values[k] = v.strip() if k != 'setup' else v
@@ -199,11 +199,3 @@ def _suggestion(key, known):
         return f' (did you mean {close[0]!r}?); known keys: {known}'
     return f'; known keys: {known} (tables hold raw scheduler options, e.g. [pbs])'
 
-
-def _toml_type(v):
-    return {
-        bool: 'a boolean',
-        int: 'an integer',
-        float: 'a float',
-        list: 'an array',
-    }.get(type(v), f'a {type(v).__name__}')

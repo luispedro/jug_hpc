@@ -1,7 +1,7 @@
 '''Loading, merging and validating jug_hpc's configuration files
 
 - ``cluster.toml``: how to submit to this cluster (:mod:`.cluster`)
-- ``jug_hpc.toml``: what this project needs (not yet implemented)
+- ``jug_hpc.toml``: what this project needs (:mod:`.project`)
 '''
 from .cluster import (
     CLUSTER_FILE,
@@ -12,13 +12,29 @@ from .cluster import (
     user_cluster_path,
 )
 from .errors import ConfigError
+from .project import (
+    CLASS_KEYS,
+    DEFAULT_CLASS,
+    PROJECT_FILE,
+    PROJECT_KEYS,
+    ProjectSettings,
+    ResourceClass,
+    load_project_settings,
+)
 
 __all__ = [
+    'CLASS_KEYS',
     'CLUSTER_FILE',
     'CLUSTER_KEYS',
     'CLUSTER_ONLY_KEYS',
+    'DEFAULT_CLASS',
+    'PROJECT_FILE',
+    'PROJECT_KEYS',
     'ClusterSettings',
     'ConfigError',
+    'ProjectSettings',
+    'ResourceClass',
     'load_cluster_settings',
+    'load_project_settings',
     'user_cluster_path',
 ]

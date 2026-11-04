@@ -14,6 +14,7 @@ __all__ = [
     'iter_leaves',
     'merge',
     'read_toml',
+    'toml_type',
 ]
 
 
@@ -139,3 +140,15 @@ def _merge_into(merged, sources, override, override_path, prefix, base_descripti
         else:
             merged[k] = v
             sources[key] = override_path
+
+
+def toml_type(v):
+    '''Describe the TOML type of a value, for error messages ("an integer")'''
+    return {
+        bool: 'a boolean',
+        int: 'an integer',
+        float: 'a float',
+        str: 'a string',
+        list: 'an array',
+        dict: 'a table',
+    }.get(type(v), f'a {type(v).__name__}')
