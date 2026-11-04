@@ -1,0 +1,50 @@
+name: Test jug_hpc
+
+on: [ push, pull_request ]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - name: Install uv
+      uses: astral-sh/setup-uv@v10.1.0
+      with:
+        version: ""
+        enable-cache: true
+        cache-dependency-glob: "uv.lock"
+    - name: Lint
+      run: |
+        uv sync --locked
+        uv run ruff check .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - '3.11'
+          - '3.12'
+          - '3.13'
+          - '3.14'
+          - '3.15'
+
+    steps:
+    - uses: actions/checkout@v6
+    - name: Install uv
+      uses: astral-sh/setup-uv@v10.1.0
+      with:
+        python-version: ${{ matrix.python-version }}
+        version: ""
+        enable-cache: true
+        cache-dependency-glob: "uv.lock"
+    - name: Install dependencies and jug_hpc
+      run: |
+        uv sync --locked
+    - name: Run tests
+      run: |
+        uv run pytest
+    - name: Check the command line entry point
+      run: |
+        uv run jug-hpc --version
