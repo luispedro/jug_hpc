@@ -179,5 +179,9 @@ def test_combine_outcomes():
     assert combine_outcomes({1: ok, 2: ok}) == ok
     assert combine_outcomes({1: ok, 2: failed, 3: timed_out, 4: failed}) == JobOutcome(
         Outcome.KILLED_TIME, None, 15,
-        '3 of 4 workers did not succeed (worker 2: exit status 1; '
-        'worker 3: killed: wall time limit reached; worker 4: exit status 1)')
+        '3 of 4 workers did not succeed (workers 2, 4: exit status 1; '
+        'worker 3: killed: wall time limit reached)')
+    many = {i: failed for i in range(1, 11)} | {3: ok, 5: timed_out}
+    assert combine_outcomes(many).detail == (
+        '9 of 10 workers did not succeed (workers 1, 2, 4, 6-10: exit status 1; '
+        'worker 5: killed: wall time limit reached)')

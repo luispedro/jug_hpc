@@ -22,8 +22,9 @@ barrier, workers stopped by `JUG_MAX_SECONDS`, failed task), and `submit --as-jo
 submitter as a job, sized by `[submitter]` in `jug_hpc.toml`), and backoff while nothing
 changes (`--max-interval`). Jug's status cache is deliberately not used (PLAN.md).
 Milestone 4 has started: `Scheduler.outcome()` for PBS and local (a `JobOutcome` per
-finished job; arrays combined by `schedulers.base.combine_outcomes`, worst worker wins);
-nothing calls it yet.
+finished job; arrays combined by `schedulers.base.combine_outcomes`, worst worker wins),
+used by the submitter to stop submitting workers for a class whose jobs keep failing
+(step 8: `submitter.update_failing`/`stopped_classes`, `Progress.STALLED`).
 
 ## Commands
 
@@ -128,11 +129,16 @@ paths replaced by `/home/me/rnaseq`.
   record). Submit commands name the script relative to the project dir (their cwd), so
   `--dry-run` prints exactly what `--all` runs.
 - **`submitter.py`**: the polling submitter's decisions, pure (no I/O): which jobs to
-  query, active workers per class, `workers_to_submit` (`min(ready, workers) - active`),
-  and `progress` (keep polling / finished / blocked by failed tasks).
-- **`poll.py`**: the loop around them. `Submitter.poll()` does one poll (counts in a
-  subprocess, `query`, submissions via `submit.prepare_class`/`write_script`/
-  `submit_worker`); the only state kept between polls is the set of settled job IDs.
+  query, active workers per class, `workers_to_submit` (`min(ready, workers) - active`,
+  skipping stopped classes), `update_failing`/`stopped_classes` (a class whose last
+  `MAX_FAILED_JOBS` jobs ended in error with no task of it ending gets no new workers), and
+  `progress` (keep polling / finished / blocked by failed tasks / stalled by failing
+  workers).
+- **`poll.py`**: the loop around them. `Submitter.poll()` does one poll (`query`, then
+  `outcome` of the jobs it saw end, then counts in a subprocess, then submissions via
+  `submit.prepare_class`/`write_script`/`submit_worker`); state kept between polls: settled
+  and watched job IDs, the previous counts, and the failing jobs per class (committed only
+  after everything that can fail was read, so a failed poll can be redone).
   `run()` repeats it, doubling the wait while nothing changes (up to `max_interval`);
   first-poll errors are fatal, later `SchedulerError`/`JugfileError` are retried
   (`MAX_FAILED_POLLS`). `cli._poll` holds `ProjectState.submitter_lock()`.

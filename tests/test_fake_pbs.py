@@ -241,7 +241,7 @@ def test_outcome_failed_setup(fake_pbs):
     assert main(['-C', str(project_dir), 'submit', '--all']) == 0
     failed = JobOutcome(Outcome.FAILED, 3, None, 'exit status 3')
     both_failed = JobOutcome(Outcome.FAILED, 3, None, (
-        '2 of 2 workers did not succeed (worker 1: exit status 3; worker 2: exit status 3)'))
+        '2 of 2 workers did not succeed (workers 1, 2: exit status 3)'))
     assert outcomes(project_dir) == {
         '1001[].fakepbs': both_failed, '1002.fakepbs': failed, '1003[].fakepbs': both_failed}
 

@@ -146,8 +146,9 @@ def combine_outcomes(outcomes):
     -------
     outcome : JobOutcome
         For one worker, its own outcome. For several, the worst one (by
-        :data:`OUTCOME_SEVERITY`), with a detail that lists every worker that
-        did not succeed.
+        :data:`OUTCOME_SEVERITY`), with a detail that lists the workers that
+        did not succeed, those with the same detail together (``workers 1-10:
+        exit status 127``).
     '''
     if not outcomes:
         return JobOutcome(Outcome.UNKNOWN, detail='no workers recorded')
@@ -158,10 +159,25 @@ def combine_outcomes(outcomes):
     if worst.outcome is Outcome.SUCCESS:
         return JobOutcome(Outcome.SUCCESS, 0)
     failed = [i for i in sorted(outcomes) if outcomes[i].outcome is not Outcome.SUCCESS]
-    detail = '; '.join(f'worker {i}: {outcomes[i].detail or outcomes[i].outcome.value}'
-                       for i in failed)
+    by_detail = {}
+    for i in failed:
+        by_detail.setdefault(outcomes[i].detail or outcomes[i].outcome.value, []).append(i)
+    detail = '; '.join(f'{"workers" if len(ixs) > 1 else "worker"} {_index_list(ixs)}: {d}'
+                       for d, ixs in by_detail.items())
     return JobOutcome(worst.outcome, worst.exit_code, worst.signal,
                       f'{len(failed)} of {len(outcomes)} workers did not succeed ({detail})')
+
+
+def _index_list(indices):
+    '''``1-4, 7, 9`` for sorted integers ``indices`` (runs of three or more as ranges)'''
+    runs = []
+    for i in indices:
+        if runs and i == runs[-1][-1] + 1:
+            runs[-1].append(i)
+        else:
+            runs.append([i])
+    return ', '.join(f'{r[0]}-{r[-1]}' if len(r) >= 3 else ', '.join(map(str, r))
+                     for r in runs)
 
 
 class SchedulerError(Exception):

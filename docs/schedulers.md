@@ -45,7 +45,12 @@ The script's header is built from the class's settings:
 
 The submitter queries jobs with `qstat -f -F json -x`. For an array job, it
 counts the elements still queued or running, so an array whose elements end at
-different times only counts the workers that are left.
+different times only counts the workers that are left. When a job ends, it
+reads how it ended with `qstat -f -F json -x -t` (so array elements are listed
+with their own `Exit_status`); a job whose workers keep failing stops the
+submissions for its class (see {doc}`submitting`). This needs the PBS server
+to keep job history (`job_history_enable`); without it, a finished job is
+simply gone, and how it ended is not known.
 
 ### Raw options
 

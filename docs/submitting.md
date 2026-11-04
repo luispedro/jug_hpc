@@ -28,10 +28,11 @@ tasks of different classes may alternate, and new tasks may appear after a
 SECONDS`), and less often while nothing changes (see [How often it
 polls](#how-often-it-polls)). At each poll it:
 
-1. loads the jugfile in a separate process and counts, per class, the tasks
+1. asks the scheduler how many workers of each class are queued or running,
+   and how the jobs that ended since the last poll did;
+2. loads the jugfile in a separate process and counts, per class, the tasks
    that are waiting, ready, running, failed and finished (the numbers of
    `jug status`);
-2. asks the scheduler how many workers of each class are queued or running;
 3. submits, for each class,
 
        min(ready tasks, workers) − queued or running workers
@@ -58,10 +59,50 @@ It stops:
   still waiting can never run (exit status 1). It lists the failed tasks per
   class. The worker logs say why they failed. Once you have fixed the problem,
   `jug cleanup --failed-only` lets the failed tasks run again, and you can
-  start `jug-hpc submit` again.
+  start `jug-hpc submit` again;
+- when the only tasks that could run belong to classes whose workers keep
+  failing (exit status 1; see [Workers that keep
+  failing](#workers-that-keep-failing)).
 
 Workers that are still queued or running when the submitter stops are left
 alone: a worker with nothing to do exits by itself after a few minutes.
+
+### Workers that keep failing
+
+A worker that dies before it starts Jug, for example because a command in
+`setup` fails, leaves its tasks ready, so the submitter would replace it at
+every poll, forever. To avoid this, the submitter looks at how its jobs ended.
+When 3 jobs of a class in a row end in error (a non-zero exit status, or
+killed by the scheduler) and no task of the class has ended (finished or
+failed) in the meantime, it stops submitting workers for that class and prints
+a warning. Workers of the class that are already queued keep their chance: if
+one of them runs a task, or a job of the class succeeds, the submitter
+submits workers for the class again.
+
+If nothing else can run, the submitter stops. Here, `setup` runs `module load
+samtools` on a machine without `module`:
+
+```
+[2026-11-05 09:03:50] align: submitted job 1 (10 workers, .jug_hpc/scripts/align-1.sh)
+[2026-11-05 09:03:50] tasks: 1 waiting, 20 ready, 0 running, 0 failed, 0 finished; workers queued or running: 10
+[2026-11-05 09:03:55] align: submitted job 2 (10 workers, .jug_hpc/scripts/align-2.sh)
+[2026-11-05 09:04:00] align: submitted job 3 (10 workers, .jug_hpc/scripts/align-3.sh)
+[2026-11-05 09:04:06] tasks: 1 waiting, 20 ready, 0 running, 0 failed, 0 finished; workers queued or running: 0
+jug-hpc: error: no task can run: the workers keep failing: [class.align]: 3 jobs in a row ended in error before any task of the class ended (jobs 1, 2, 3; the last: 10 of 10 workers did not succeed (workers 1-10: exit status 127))
+jug-hpc: note: the worker logs (in logs/) and the scheduler's (in logs/scheduler/) say why the jobs failed; once fixed, run 'jug-hpc submit' again
+```
+
+and `logs/align-3-1.log` says:
+
+```
+/home/me/rnaseq/.jug_hpc/scripts/align-3.sh: line 14: module: command not found
+```
+
+Only the jobs that the submitter saw queued or running count: jobs that had
+already ended when it started may have failed before you fixed the problem,
+so a new `jug-hpc submit` gives every class a fresh start. On PBS, this needs
+the server to keep job history (`qstat -x`); without it, finished jobs are
+forgotten at once and their outcome is unknown.
 
 ### How often it polls
 
@@ -241,9 +282,5 @@ jug_hpc is in early development. In particular:
   but only do this when no worker is running). Use the `file_keepalive:` jugdir
   backend instead: there, a lock that is not refreshed for 30 minutes counts
   as failed (see the {doc}`faq`).
-- If workers die before they start Jug, for example because a `setup` command
-  fails, the submitter submits new workers at every poll. Look at
-  `logs/scheduler/` and the worker logs when a class's workers keep being
-  submitted.
 - The submitter loads the jugfile at every poll. For jugfiles with millions of
   tasks, use a longer `--interval` and `--max-interval`.

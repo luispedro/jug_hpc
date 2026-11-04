@@ -253,6 +253,9 @@ Remaining:
      `Exit_status`, and the actual `Exit_status` of a job killed for memory
      (cgroups or MoM enforcement), for wall time, by `qdel`, and of an array
      with a deleted element;
+   - a `setup` that fails (`exit 3; ...`): plain `jug-hpc submit` stops after
+     3 jobs of the class with `Progress.STALLED` (needs job history; check
+     that the site keeps it long enough for a poll to see the job end);
    - plain `jug-hpc submit` and `--as-job`: that compute nodes may run
      `qsub`/`qstat`, and that the job finds the same `cluster.toml` (a
      non-default `XDG_CONFIG_HOME` is not passed to PBS jobs).
@@ -275,9 +278,9 @@ CPUs of the worker that ran them).
 3. Done: `outcome()` in the PBS backend (`qstat -f -F json -x -t`, so array
    elements are listed with their own `Exit_status`; codes and the wall-time
    heuristic in `pbs.py`'s docstring). Arrays get their worst worker's
-   outcome in both backends (`base.combine_outcomes`). Jobs not finished or
-   unknown are left out of the result. Nothing calls `outcome()` yet (steps
-   4 and 8 will).
+   outcome in both backends (`base.combine_outcomes`, which groups workers
+   with the same detail). Jobs not finished or unknown are left out of the
+   result. Used by step 8; step 4 will use it too.
 4. Report jobs killed by the scheduler, broken down by class, in `status` and
    in the submitter's log, with a suggestion (raise `memory`, raise `time`, or
    lower `time_fraction`).
@@ -293,13 +296,27 @@ CPUs of the worker that ran them).
 7. When the submitter stops because of failed tasks, cancel the workers left
    waiting for tasks that depend on them: each waits `NR_WAIT_CYCLES ×
    WAIT_CYCLE_TIME` (3 min) before exiting, holding its allocation.
-8. Workers that die before Jug starts (e.g. a `setup` command that fails)
-   leave the tasks ready, so the submitter submits a new job at every poll,
-   forever (seen on the local backend with `module load` in `setup` and no
-   `module` command: exit status 127, a new 10-worker array every poll).
-   With step 3, stop (or back off) when a class's recent jobs all ended
-   with an error without any task of the class finishing, and point at
-   `logs/scheduler/`. Documented as a limitation in `docs/submitting.md`.
+8. Done: workers that die before Jug starts (e.g. a `setup` command that
+   fails) left the tasks ready, so the submitter submitted a new job at
+   every poll, forever. Now the submitter fetches the outcome of each job it
+   saw queued or running once it ends, and keeps per class the jobs that
+   ended in error since a task of the class last ended (finished or failed;
+   a job that succeeds also clears the list). After `MAX_FAILED_JOBS` (3)
+   such jobs the class is *stopped*: no new workers until a task of the
+   class ends. When only stopped classes (without queued or running
+   workers) have ready tasks and nothing runs, the run ends with
+   `Progress.STALLED` (exit status 1, pointing at the logs). Decisions:
+   - Jobs already ended when the submitter first queries them are not
+     counted (they may predate a fix), so a restart gives every class a
+     fresh start.
+   - The poll now queries the scheduler *before* counting tasks, so the
+     tasks a job ran before it ended are in the counts of the poll that sees
+     it end; failures seen at a poll where a task of the class ended are not
+     counted (lenient: a false stop is worse than a few extra jobs).
+   - Without PBS job history, finished jobs are UNKNOWN and have no
+     outcome, so the rule never triggers (documented).
+   - Not configurable yet (`MAX_FAILED_JOBS` is a constant); maybe a
+     `--max-failed-jobs` option if users ask.
 
 **Done when:** a test jugfile with a task that exceeds its memory and one that
 exceeds its wall time produces a correct per-class report on PBS. →

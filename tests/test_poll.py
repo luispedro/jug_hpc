@@ -13,11 +13,18 @@ from jug_hpc.config import ConfigError, load_cluster_settings, load_project_sett
 from jug_hpc.jugstate import STATES, JugfileError, load_project
 from jug_hpc.poll import Submitter, run
 from jug_hpc.runner import FakeRunner
-from jug_hpc.schedulers import JobId, JobState, JobStatus, Outcome, SchedulerError
+from jug_hpc.schedulers import (
+    JobId,
+    JobOutcome,
+    JobState,
+    JobStatus,
+    Outcome,
+    SchedulerError,
+)
 from jug_hpc.schedulers.local import LocalScheduler
 from jug_hpc.schedulers.pbs import PBSScheduler
 from jug_hpc.state import ProjectState, StateError
-from jug_hpc.submitter import Progress
+from jug_hpc.submitter import MAX_FAILED_JOBS, Progress
 
 JUGFILES = Path(__file__).parent / 'jugfiles'
 
@@ -45,7 +52,9 @@ class FakePBS(PBSScheduler):
     def __init__(self, cluster):
         super().__init__(cluster, FakeRunner())
         self.statuses = {}
+        self.outcomes = {}           # how finished jobs ended (default: success)
         self.queries = []
+        self.outcome_queries = []
         self.fail_submit = set()     # classes whose submission fails
         self.fail_query = 0          # number of queries to fail
         self._next = 1000
@@ -64,6 +73,11 @@ class FakePBS(PBSScheduler):
             self.fail_query -= 1
             raise SchedulerError('pbs: qstat timed out')
         return {j: self.statuses.get(j, JobStatus(JobState.UNKNOWN)) for j in jobs}
+
+    def outcome(self, jobs):
+        self.outcome_queries.append(list(jobs))
+        return {j: self.outcomes.get(j, JobOutcome(Outcome.SUCCESS, 0)) for j in jobs
+                if j in self.statuses and self.statuses[j].state is JobState.FINISHED}
 
     def finish_all(self):
         for j in self.statuses:
@@ -287,6 +301,158 @@ def test_poll_counts_in_a_subprocess(project):
     assert submitted(r) == [('default', 3)]
 
 
+# --- jobs that keep failing ------------------------------------------------------
+
+EXIT_127 = JobOutcome(Outcome.FAILED, 127, None, 'exit status 127')
+
+
+def fail_all(sched):
+    '''Every job ends, in error'''
+    for j in sched.statuses:
+        sched.statuses[j] = JobStatus(JobState.FINISHED)
+        sched.outcomes.setdefault(j, EXIT_127)
+
+
+def test_poll_stops_class_whose_jobs_fail(setup):
+    submitter, counts, sched, _state, _ = setup
+    counts.set(LOAD, ready=1)
+    counts.set(ALIGN, ready=3)
+    r = submitter.poll()
+    assert submitted(r) == [('align', 2), ('default', 1)]
+    sched.statuses['1002.pbs'] = JobStatus(JobState.RUNNING, running=1)
+    counts.set(LOAD, running=1)
+    align_jobs = ['1001.pbs', '1003.pbs', '1004.pbs']
+    for n, job_id in enumerate(align_jobs[:-1], 1):
+        sched.statuses[job_id] = JobStatus(JobState.FINISHED)
+        sched.outcomes[job_id] = EXIT_127
+        r = submitter.poll()
+        assert submitted(r) == [('align', 2)]
+        assert r.stopped == {}
+        assert [rec.job_id for rec, _ in submitter.failing['align']] == align_jobs[:n]
+    sched.statuses['1004.pbs'] = JobStatus(JobState.FINISHED)
+    sched.outcomes['1004.pbs'] = EXIT_127
+    r = submitter.poll()
+    # the default class still runs a task
+    assert r.report.progress is Progress.RUNNING
+    assert submitted(r) == []
+    assert list(r.stopped) == ['align']
+    assert [(rec.job_id, o) for rec, o in r.stopped['align']] == [
+        (j, EXIT_127) for j in align_jobs]
+    # each ended job is asked about once
+    assert sched.outcome_queries == [[j] for j in align_jobs]
+    r = submitter.poll()
+    assert submitted(r) == []
+    assert len(sched.outcome_queries) == len(align_jobs)
+
+    # a task of the class ends (e.g. run by hand): workers are submitted again
+    counts.set(ALIGN, ready=2, finished=1)
+    r = submitter.poll()
+    assert r.stopped == {}
+    assert submitted(r) == [('align', 2)]
+
+
+def test_cli_stopped_messages(setup):
+    from jug_hpc.cli import _stopped_messages
+    submitter, counts, sched, _state, _ = setup
+    counts.set(LOAD, running=1)
+    counts.set(ALIGN, ready=3)
+    for _ in range(MAX_FAILED_JOBS):
+        assert _stopped_messages(set(), submitter.poll()) == []
+        fail_all(sched)
+    r = submitter.poll()
+    assert _stopped_messages(set(), r) == [(
+        'warning', ('[class.align]: 3 jobs in a row ended in error before any task of the '
+        'class ended (jobs 1001.pbs, 1002.pbs, 1003.pbs; the last: exit status 127); no more workers '
+        'are submitted for it while this lasts'))]
+    assert _stopped_messages({'align'}, r) == []
+    counts.set(ALIGN, ready=2, finished=1)
+    assert _stopped_messages({'align'}, submitter.poll()) == [
+        ('note', ('[class.align]: a task of the class ended or a job succeeded: '
+                 'submitting its workers again'))]
+
+
+def test_poll_stalled(setup):
+    submitter, counts, sched, _state, _ = setup
+    counts.set(LOAD, finished=1)
+    counts.set(ALIGN, ready=3)
+    counts.set(MERGE, waiting=1)
+    for _ in range(MAX_FAILED_JOBS):
+        assert submitted(submitter.poll()) == [('align', 2)]
+        fail_all(sched)
+    r = submitter.poll()
+    assert r.report.progress is Progress.STALLED
+    assert list(r.report.stalled) == ['align']
+    assert submitted(r) == []
+
+
+def test_poll_stopped_class_with_queued_workers(setup):
+    '''A stopped class's queued workers may still run its tasks: keep polling'''
+    submitter, counts, sched, state, _ = setup
+    counts.set(ALIGN, ready=3)
+    sched.statuses['99.pbs'] = JobStatus(JobState.QUEUED, queued=1)
+    state.add_job('99.pbs', 'align', 'pbs', 1, '.jug_hpc/scripts/align-1.sh')
+    for _ in range(MAX_FAILED_JOBS):
+        assert submitted(submitter.poll()) == [('align', 1)]
+        fail_all(sched)
+        sched.statuses['99.pbs'] = JobStatus(JobState.QUEUED, queued=1)
+    r = submitter.poll()
+    assert r.report.progress is Progress.RUNNING
+    assert list(r.stopped) == ['align']
+    assert submitted(r) == []
+    # it ends in error too: nothing can run
+    fail_all(sched)
+    r = submitter.poll()
+    assert r.report.progress is Progress.STALLED
+    assert [rec.job_id for rec, _ in r.report.stalled['align']][-1] == '99.pbs'
+
+
+def test_poll_ignores_jobs_ended_before_it_started(setup):
+    '''Jobs found ended at the first poll may have failed before a fix'''
+    submitter, counts, sched, state, _ = setup
+    for i in range(5):
+        job_id = f'{90 + i}.pbs'
+        sched.statuses[job_id] = JobStatus(JobState.FINISHED)
+        sched.outcomes[job_id] = EXIT_127
+        state.add_job(job_id, 'align', 'pbs', 2, '.jug_hpc/scripts/align-1.sh')
+    counts.set(ALIGN, ready=3)
+    r = submitter.poll()
+    assert submitted(r) == [('align', 2)]
+    assert sched.outcome_queries == []
+    assert submitter.failing == {}
+
+
+def test_poll_succeeded_job_clears_failures(setup):
+    submitter, counts, sched, _state, _ = setup
+    counts.set(ALIGN, ready=3)
+    for _ in range(MAX_FAILED_JOBS - 1):
+        submitter.poll()
+        fail_all(sched)
+    submitter.poll()
+    sched.finish_all()                   # this one succeeds
+    r = submitter.poll()
+    assert submitter.failing == {}
+    assert submitted(r) == [('align', 2)]
+
+
+def test_poll_failed_outcome_query_changes_nothing(setup):
+    submitter, counts, sched, _state, _ = setup
+    counts.set(ALIGN, ready=3)
+    submitter.poll()
+    fail_all(sched)
+
+    def broken(jobs):
+        raise SchedulerError('pbs: qstat timed out')
+
+    sched.outcome = broken
+    with pytest.raises(SchedulerError):
+        submitter.poll()
+    assert submitter.settled == set()
+    del sched.outcome
+    r = submitter.poll()
+    assert [rec.job_id for rec, _ in submitter.failing['align']] == ['1001.pbs']
+    assert submitted(r) == [('align', 2)]
+
+
 # --- run ------------------------------------------------------------------------
 
 def test_run_until_finished(setup):
@@ -376,6 +542,16 @@ def test_run_until_blocked(setup):
     assert r.report.progress is Progress.BLOCKED
     assert r.report.failed == {'default': 3}
     assert r.report.waiting == {'align': 3}
+
+
+def test_run_until_stalled(setup):
+    submitter, counts, sched, _state, _ = setup
+    counts.set(ALIGN, ready=3)
+    sleeps = []
+    r = run(submitter, interval=7, on_poll=lambda _: fail_all(sched), sleep=sleeps.append)
+    assert r.report.progress is Progress.STALLED
+    assert len(r.report.stalled['align']) == MAX_FAILED_JOBS
+    assert sleeps == [7] * MAX_FAILED_JOBS
 
 
 def test_run_first_poll_failure_is_fatal(setup):
@@ -634,6 +810,36 @@ def test_cli_submit_blocked(tmp_path, monkeypatch, capsys):
                    'tasks waiting for them: [class.middle] 1\n'
                    "jug-hpc: note: the worker logs say why the tasks failed; once fixed, "
                    "'jug cleanup --failed-only' lets them run again\n")
+
+
+@needs_bash
+def test_cli_submit_stops_failing_workers(tmp_path, monkeypatch, capsys):
+    '''Workers whose setup fails are not replaced forever'''
+    project_dir, sched = local_project(tmp_path, monkeypatch, CHAIN)
+    toml = project_dir / 'jug_hpc.toml'
+    toml.write_text(toml.read_text().replace('setup = "', 'setup = "exit 127; '))
+    status = main(['-C', str(project_dir), 'submit', '--interval=0.2'])
+    out, err = capsys.readouterr()
+    jobs = [r.job_id for r in ProjectState(project_dir).jobs()]
+    wait_for_jobs(sched, jobs)
+    assert status == 1, out
+    assert jobs == [str(i) for i in range(1, MAX_FAILED_JOBS + 1)]
+    detail = ('3 jobs in a row ended in error before any task of the class ended '
+              '(jobs 1, 2, 3; the last: 2 of 2 workers did not succeed '
+              '(workers 1, 2: exit status 127))')
+    assert err == (
+        f'jug-hpc: error: no task can run: the workers keep failing: [default]: {detail}\n'
+        "jug-hpc: note: the worker logs (in logs/) and the scheduler's (in "
+        "logs/scheduler/) say why the jobs failed; once fixed, run 'jug-hpc submit' "
+        'again\n')
+
+    # once fixed, a new submitter runs it to the end
+    toml.write_text(toml.read_text().replace('setup = "exit 127; ', 'setup = "'))
+    status = main(['-C', str(project_dir), 'submit', '--interval=0.2'])
+    out, err = capsys.readouterr()
+    wait_for_jobs(sched, [r.job_id for r in ProjectState(project_dir).jobs()])
+    assert (status, err) == (0, ''), out
+    assert out.splitlines()[-1].endswith('every task is finished')
 
 
 BARRIER = '''\

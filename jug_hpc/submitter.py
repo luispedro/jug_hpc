@@ -20,6 +20,9 @@ can be tested without a scheduler or a jugfile:
 - :func:`is_settled` says when a job never needs to be asked about again;
 - :func:`active_workers` counts the queued and running workers per class;
 - :func:`workers_to_submit` applies the rule above;
+- :func:`update_failing` keeps track of the jobs of each class that ended in
+  error, and :func:`stopped_classes` says which classes get no more workers
+  because of them;
 - :func:`progress` says whether to keep polling (:class:`Progress`);
 - :func:`active_submitter_jobs` finds a submitter job (``jug-hpc submit
   --as-job``) still queued or running, so that a second one is not
@@ -34,16 +37,30 @@ long ago, and its record was purged. But some schedulers take a moment to list
 a job they have just accepted, so a job submitted less than
 :data:`SUBMIT_GRACE` seconds ago and reported unknown is counted as if all its
 workers were queued; otherwise the next poll would submit its workers again.
+
+Workers that die before Jug starts (e.g. because a ``setup`` command fails)
+leave their tasks ready, so the rule above would replace them at every poll,
+forever. So the submitter looks at how its jobs ended (:meth:`Scheduler.outcome`)
+and, for each class, keeps the jobs that ended in error (anything but
+``Outcome.SUCCESS``) since a task of the class last ended (finished or failed).
+After :data:`MAX_FAILED_JOBS` such jobs in a row, the class is *stopped*: it
+gets no new workers until one of its tasks ends (e.g. run by a worker that was
+already queued) or the submitter is started again. A job that succeeds, or a
+task of the class that ends, clears the class's list. The rule is lenient on
+purpose: the failures seen at a poll where a task of the class ended are not
+counted, as that job may have run tasks before it was killed. When nothing
+else can run, the run ends with ``Progress.STALLED``.
 '''
 import enum
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 
 from .config.project import SUBMITTER
-from .schedulers.base import JobState
+from .schedulers.base import JobState, Outcome
 
 __all__ = [
+    'MAX_FAILED_JOBS',
     'SUBMIT_GRACE',
     'Progress',
     'ProgressReport',
@@ -53,12 +70,18 @@ __all__ = [
     'is_settled',
     'jobs_to_query',
     'progress',
+    'stopped_classes',
     'submitter_jobs',
+    'update_failing',
     'workers_to_submit',
 ]
 
 #: How long (seconds) after submission an unknown job is still counted as queued
 SUBMIT_GRACE = 300
+
+#: Jobs of a class in a row that may end in error, with no task of the class
+#: ending, before the class gets no more workers
+MAX_FAILED_JOBS = 3
 
 
 class Progress(enum.Enum):
@@ -66,6 +89,7 @@ class Progress(enum.Enum):
     RUNNING = 'running'    # tasks are ready or running: keep polling
     FINISHED = 'finished'  # every task is finished
     BLOCKED = 'blocked'    # nothing is ready or running, and some tasks failed
+    STALLED = 'stalled'    # only tasks of stopped classes are ready (their jobs fail)
 
 
 @dataclass(frozen=True)
@@ -80,10 +104,15 @@ class ProgressReport:
     waiting : dict
         Class name -> number of waiting tasks, for the classes that have any
         (when blocked: the tasks that depend on failed tasks)
+    stalled : dict
+        Class name -> the jobs that ended in error, as ``(JobRecord,
+        JobOutcome)`` pairs, for the stopped classes that have ready tasks and
+        no queued or running workers (when stalled: why nothing can run)
     '''
     progress: Progress
     failed: Mapping
     waiting: Mapping
+    stalled: Mapping = field(default_factory=dict)
 
 
 def _recent(record, now, grace):
@@ -218,7 +247,71 @@ def class_limits(project):
     return {rc.name: rc.workers for rc in project.all_classes()}
 
 
-def workers_to_submit(by_class, active, limits):
+def _ended(counts):
+    return counts.finished + counts.failed
+
+
+def update_failing(failing, by_class, previous, ended_jobs):
+    '''The jobs of each class that ended in error since a task of the class ended
+
+    Parameters
+    ----------
+    failing : dict
+        Class name -> tuple of ``(JobRecord, JobOutcome)``, as returned at the
+        previous poll (empty at the first)
+    by_class : dict
+        Class name -> TaskCounts, at this poll
+    previous : dict or None
+        Class name -> TaskCounts, at the previous poll (None at the first)
+    ended_jobs : sequence of (JobRecord, JobOutcome)
+        The jobs seen to end since the previous poll, in submission order
+        (jobs that had already ended when first queried are left out: when they
+        ended is not known)
+
+    Returns
+    -------
+    failing : dict
+        Class name -> tuple of ``(JobRecord, JobOutcome)``, oldest first, for
+        the classes that have any. A class's jobs are dropped when a task of
+        the class ended since the previous poll (its finished and failed
+        tasks went up; this poll's jobs are then not counted either) or when
+        one of its jobs succeeded.
+    '''
+    previous = previous or {}
+    progressed = {name for name, counts in by_class.items()
+                  if name in previous and _ended(counts) > _ended(previous[name])}
+    updated = {name: list(jobs) for name, jobs in failing.items() if name not in progressed}
+    for record, outcome in ended_jobs:
+        name = record.class_name
+        if name in progressed:
+            continue
+        if outcome.outcome is Outcome.SUCCESS:
+            updated.pop(name, None)
+        else:
+            updated.setdefault(name, []).append((record, outcome))
+    return {name: tuple(jobs) for name, jobs in updated.items() if jobs}
+
+
+def stopped_classes(failing, limit=MAX_FAILED_JOBS):
+    '''The classes that get no new workers: dict class name -> failed jobs
+
+    Parameters
+    ----------
+    failing : dict
+        As returned by :func:`update_failing`
+    limit : int, optional
+        Jobs that may end in error in a row
+
+    Returns
+    -------
+    stopped : dict
+        Class name -> tuple of ``(JobRecord, JobOutcome)``, for the classes
+        with at least ``limit`` failed jobs
+    '''
+    return {name: jobs for name, jobs in failing.items() if len(jobs) >= limit}
+
+
+def workers_to_submit(by_class, active, limits, stopped=()):
     '''How many new workers to submit for each class
 
     Parameters
@@ -232,6 +325,8 @@ def workers_to_submit(by_class, active, limits):
     limits : dict
         Class name -> the class's ``workers`` setting, for every class in
         ``by_class`` (see :func:`class_limits`)
+    stopped : collection of str, optional
+        Classes that get no new workers (see :func:`stopped_classes`)
 
     Returns
     -------
@@ -241,6 +336,8 @@ def workers_to_submit(by_class, active, limits):
     '''
     to_submit = {}
     for name, counts in by_class.items():
+        if name in stopped:
+            continue
         wanted = min(counts.ready, limits[name])
         n = wanted - active.get(name, 0)
         if n > 0:
@@ -248,7 +345,7 @@ def workers_to_submit(by_class, active, limits):
     return to_submit
 
 
-def progress(by_class, hit_barrier=False):
+def progress(by_class, hit_barrier=False, stalled=None):
     '''Whether the submitter keeps polling
 
     Parameters
@@ -259,22 +356,31 @@ def progress(by_class, hit_barrier=False):
         True if loading the jugfile stopped at a ``barrier()``: tasks after it
         are not known yet, so the run is not finished even if every known task
         is
+    stalled : dict, optional
+        Class name -> failed jobs, for the stopped classes (see
+        :func:`stopped_classes`) without queued or running workers: their
+        ready tasks will not be run
 
     Returns
     -------
     report : ProgressReport
-        ``FINISHED`` when every task is finished; ``BLOCKED`` when no task is
-        ready or running and some have failed (the waiting tasks depend on
-        them, so no worker could run them); ``RUNNING`` otherwise. Queued and
-        running workers are not considered: a worker with nothing left to do
-        ends by itself.
+        ``FINISHED`` when every task is finished; ``STALLED`` when no task is
+        running and only the tasks of ``stalled`` classes are ready;
+        ``BLOCKED`` when no task is ready or running and some have failed (the
+        waiting tasks depend on them, so no worker could run them); ``RUNNING``
+        otherwise. Queued and running workers are not considered (except
+        through ``stalled``): a worker with nothing left to do ends by itself.
     '''
+    stalled = {n: jobs for n, jobs in (stalled or {}).items()
+               if n in by_class and by_class[n].ready}
     failed = {n: c.failed for n, c in by_class.items() if c.failed}
     waiting = {n: c.waiting for n, c in by_class.items() if c.waiting}
-    ready = sum(c.ready for c in by_class.values())
+    ready = sum(c.ready for n, c in by_class.items() if n not in stalled)
     running = sum(c.running for c in by_class.values())
     if ready or running:
         state = Progress.RUNNING
+    elif stalled:
+        return ProgressReport(Progress.STALLED, failed, waiting, stalled)
     elif failed:
         state = Progress.BLOCKED
     elif waiting or hit_barrier:

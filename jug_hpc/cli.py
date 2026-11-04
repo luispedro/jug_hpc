@@ -312,8 +312,13 @@ def _poll(args, start):
         return 1
     interval = _interval(args)
     last = [None]
+    stopped = set()
 
     def on_poll(result):
+        for kind, message in _stopped_messages(stopped, result):
+            _message(kind, message)
+        stopped.clear()
+        stopped.update(result.stopped)
         for record in result.submitted:
             workers = record.workers
             _log(f'{record.class_name}: submitted job {record.job_id} '
@@ -350,15 +355,32 @@ def _poll(args, start):
     except KeyboardInterrupt:
         _message('note', 'interrupted: the workers already submitted keep running')
         return 130
-    return _report_end(result.report)
+    return _report_end(result.report, _relative(project.logs, project_dir))
 
 
-def _report_end(report):
-    '''Report a run that is over (finished or blocked); returns the exit status'''
+def _report_end(report, logs='logs'):
+    '''Report a run that is over (finished, blocked or stalled); returns the exit
+    status
+
+    ``logs`` is the worker logs directory, as shown to the user.
+    '''
     from .submitter import Progress
+    from .worker import SCHEDULER_LOGS
     if report.progress is Progress.FINISHED:
         _log('every task is finished')
         return 0
+    if report.progress is Progress.STALLED:
+        stalled = '; '.join(f'{_table_label(n)}: {_failed_jobs(jobs)}'
+                            for n, jobs in report.stalled.items())
+        message = f'no task can run: the workers keep failing: {stalled}'
+        if report.failed:
+            failed = ', '.join(f'{_table_label(n)} {c}' for n, c in report.failed.items())
+            message += f'; failed tasks: {failed}'
+        _error(message)
+        _message('note', f"the worker logs (in {logs}/) and the scheduler's (in "
+                         f'{logs}/{SCHEDULER_LOGS}/) say why the jobs failed; once fixed, '
+                         "run 'jug-hpc submit' again")
+        return 1
     failed = ', '.join(f'{_table_label(n)} {c}' for n, c in report.failed.items())
     message = f'no task can run: failed tasks: {failed}'
     if report.waiting:
@@ -368,6 +390,46 @@ def _report_end(report):
     _message('note', 'the worker logs say why the tasks failed; once fixed, '
                      "'jug cleanup --failed-only' lets them run again")
     return 1
+
+
+def _stopped_messages(before, result):
+    '''Messages about the classes stopped or started again since the last poll
+
+    Parameters
+    ----------
+    before : collection of str
+        The classes stopped at the last poll
+    result : PollResult
+
+    Returns
+    -------
+    messages : list of (kind, message)
+    '''
+    messages = [('note', (f'{_table_label(name)}: a task of the class ended or a job '
+                         'succeeded: submitting its workers again'))
+                for name in before if name not in result.stopped]
+    for name, jobs in result.stopped.items():
+        # a run that ends now says so in its error
+        if name not in before and name not in result.report.stalled:
+            messages.append(('warning', (f'{_table_label(name)}: {_failed_jobs(jobs)}; no '
+                                        'more workers are submitted for it while this lasts')))
+    return messages
+
+
+def _failed_jobs(jobs):
+    '''What :func:`jug_hpc.submitter.stopped_classes` found, in a few words'''
+    ids = ', '.join(r.job_id for r, _ in jobs)
+    last = jobs[-1][1]
+    return (f'{len(jobs)} jobs in a row ended in error before any task of the class '
+            f'ended (jobs {ids}; the last: {last.detail or last.outcome.value})')
+
+
+def _relative(path, start):
+    '''``path`` relative to ``start`` if it is inside it, as a string'''
+    try:
+        return str(Path(path).relative_to(start))
+    except ValueError:
+        return str(path)
 
 
 def _submit_as_job(args, start):
@@ -441,11 +503,7 @@ def _submit_as_job(args, start):
             print(e.details.rstrip('\n'), file=sys.stderr)
         _error(e)
         return 1
-    logs = prepared.spec.logs
-    try:
-        logs = logs.relative_to(project_dir)
-    except ValueError:
-        pass
+    logs = _relative(prepared.spec.logs, project_dir)
     print(f'{record.class_name}: submitted job {record.job_id} ({record.script}); '
           f'it logs to {logs}/{record.class_name}-<job id>.log', flush=True)
     return 0

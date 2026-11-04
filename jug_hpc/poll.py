@@ -1,15 +1,25 @@
 '''The polling submitter's loop: ``jug-hpc submit``
 
-:class:`Submitter` does one poll at a time (:meth:`Submitter.poll`): it counts
-the tasks of each class in a subprocess, asks the scheduler about the jobs not
-yet known to have ended, and submits the workers that the rule of
-:mod:`jug_hpc.submitter` asks for. :func:`run` polls until the run is over.
+:class:`Submitter` does one poll at a time (:meth:`Submitter.poll`): it asks
+the scheduler about the jobs not yet known to have ended (and how those that
+just ended did), counts the tasks of each class in a subprocess, and submits
+the workers that the rule of :mod:`jug_hpc.submitter` asks for. :func:`run`
+polls until the run is over.
+
+The scheduler is asked before the tasks are counted, so that the tasks a job
+ran before it ended are in the counts of the poll that sees it end (the
+failed jobs of a class are forgotten when its tasks end; see
+:func:`jug_hpc.submitter.update_failing`).
 
 The decisions are the pure functions of :mod:`jug_hpc.submitter`; this module
-does the I/O around them. The only state kept between polls is the set of jobs
-known to have ended (so they are not queried again); everything else is read
-again at each poll, from the jugfile's store and ``.jug_hpc/jobs.json``, so a
-submitter can be stopped and started again at any time.
+does the I/O around them. The state kept between polls is small: the jobs
+known to have ended (so they are not queried again), the jobs seen queued or
+running (only the end of those is looked at: a job that had ended when first
+queried may have ended before a fix), the previous poll's task counts, and the
+jobs of each class that ended in error. Everything else is read again at each
+poll, from the jugfile's store and ``.jug_hpc/jobs.json``, so a submitter can
+be stopped and started again at any time (a new submitter gives stopped
+classes another chance).
 
 :func:`run` backs off while nothing changes: after a poll that finds the same
 task counts and active workers as the one before and submits nothing, the wait
@@ -40,7 +50,7 @@ from datetime import UTC, datetime
 
 from .classes import Classifier, counts_by_class
 from .jugstate import JugfileError, project_task_counts
-from .schedulers.base import SchedulerError
+from .schedulers.base import JobState, SchedulerError
 from .schedulers.checks import check_scheduler_settings
 from .submit import check_jugdir, prepare_class, submit_worker, write_script
 from .submitter import (
@@ -50,6 +60,8 @@ from .submitter import (
     is_settled,
     jobs_to_query,
     progress,
+    stopped_classes,
+    update_failing,
     workers_to_submit,
 )
 
@@ -90,6 +102,10 @@ class PollResult:
         Class name -> queued or running workers, before this poll's submissions
     report : ProgressReport
         Whether to keep polling
+    stopped : dict
+        Class name -> the jobs that ended in error, as ``(JobRecord,
+        JobOutcome)`` pairs, for the classes that get no new workers (see
+        :func:`jug_hpc.submitter.stopped_classes`)
     submitted : list of JobRecord
         The jobs submitted by this poll
     errors : list of SchedulerError
@@ -101,6 +117,7 @@ class PollResult:
     hit_barrier: bool
     active: dict
     report: object
+    stopped: dict = field(default_factory=dict)
     submitted: list = field(default_factory=list)
     errors: list = field(default_factory=list)
     output: str = ''
@@ -151,12 +168,19 @@ class Submitter:
         self.limits = class_limits(project)
         #: JobIds of the jobs known to have ended
         self.settled = set()
+        #: JobIds of the jobs submitted, or seen queued or running, by this
+        #: submitter and not yet ended: the outcome of those that end is used
+        self.watched = set()
+        #: Class name -> TaskCounts, at the previous poll
+        self.previous = None
+        #: Class name -> the jobs that ended in error (see ``update_failing``)
+        self.failing = {}
 
     def poll(self):
-        '''Count the tasks, query the jobs, and submit the workers needed
+        '''Query the jobs, count the tasks, and submit the workers needed
 
         Nothing is submitted unless the run is still going on
-        (``Progress.RUNNING``).
+        (``Progress.RUNNING``), and nothing for the stopped classes.
 
         Returns
         -------
@@ -175,38 +199,55 @@ class Submitter:
             If ``.jug_hpc/`` cannot be read or written, or a job was submitted
             but could not be recorded
         '''
-        counted = project_task_counts(self.project, runner=self.counts_runner,
-                                      timeout=self.counts_timeout)
-        by_class = counts_by_class(self.classifier, counted.counts)
         records = jobs_to_query(self.project_state.jobs(), self.scheduler.name, self.settled)
         statuses = self.scheduler.query([r.job_id for r in records]) if records else {}
         now = self.clock()
-        for r in records:
-            status = statuses.get(r.job_id)
-            if status is not None and is_settled(r, status, now):
-                self.settled.add(r.job_id)
+        settled = [r for r in records
+                   if (s := statuses.get(r.job_id)) is not None and is_settled(r, s, now)]
+        seen_ending = [r for r in settled if r.job_id in self.watched
+                       and statuses[r.job_id].state is JobState.FINISHED]
+        outcomes = (self.scheduler.outcome([r.job_id for r in seen_ending])
+                    if seen_ending else {})
+        counted = project_task_counts(self.project, runner=self.counts_runner,
+                                      timeout=self.counts_timeout)
+        by_class = counts_by_class(self.classifier, counted.counts)
+
+        # nothing above changed the submitter's state, so a poll that failed
+        # can be done again
+        self.settled.update(r.job_id for r in settled)
+        self.watched = {r.job_id for r in records} - self.settled
+        self.failing = update_failing(
+            self.failing, by_class, self.previous,
+            [(r, outcomes[r.job_id]) for r in seen_ending if r.job_id in outcomes])
+        self.previous = by_class
+
         active = active_workers(records, statuses, now)
-        report = progress(by_class, counted.hit_barrier)
-        result = PollResult(by_class, counted.hit_barrier, active, report,
+        stopped = stopped_classes(self.failing)
+        stalled = {n: jobs for n, jobs in stopped.items() if not active.get(n)}
+        report = progress(by_class, counted.hit_barrier, stalled)
+        result = PollResult(by_class, counted.hit_barrier, active, report, stopped,
                             output=counted.output)
         if report.progress is not Progress.RUNNING:
             return result
-        for name, n in workers_to_submit(by_class, active, self.limits).items():
+        for name, n in workers_to_submit(by_class, active, self.limits, stopped).items():
             prepared = prepare_class(self.cluster, self.project, self.project.get_class(name),
                                      self.scheduler, workers=n, tasks=by_class[name].total,
                                      task_names=counted.counts.keys(), jug=self.jug)
             written = write_script(prepared, self.scheduler, self.project_state)
             try:
-                result.submitted.append(
-                    submit_worker(written, self.scheduler, self.project_state))
+                record = submit_worker(written, self.scheduler, self.project_state)
             except SchedulerError as e:
                 result.errors.append(e)
+            else:
+                result.submitted.append(record)
+                self.watched.add(record.job_id)
         return result
 
 
 def run(submitter, *, interval=POLL_INTERVAL, max_interval=None, on_poll=None,
         on_failure=None, max_failed=MAX_FAILED_POLLS, sleep=time.sleep):
-    '''Poll until every task is finished or no task can run
+    '''Poll until every task is finished or no task can run (because tasks
+    failed, or the workers of the classes with ready tasks keep failing)
 
     Parameters
     ----------
@@ -232,8 +273,8 @@ def run(submitter, *, interval=POLL_INTERVAL, max_interval=None, on_poll=None,
     Returns
     -------
     result : PollResult
-        The last poll's, whose ``report.progress`` is ``FINISHED`` or
-        ``BLOCKED``
+        The last poll's, whose ``report.progress`` is ``FINISHED``,
+        ``BLOCKED`` or ``STALLED``
 
     Raises
     ------
@@ -283,4 +324,4 @@ def run(submitter, *, interval=POLL_INTERVAL, max_interval=None, on_poll=None,
 
 def _seen(result):
     '''What a poll found that, when it changes, resets the backoff'''
-    return (result.by_class, result.hit_barrier, result.active)
+    return (result.by_class, result.hit_barrier, result.active, tuple(result.stopped))

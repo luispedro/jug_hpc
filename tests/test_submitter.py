@@ -6,9 +6,10 @@ from hypothesis import strategies as st
 
 from jug_hpc.config import load_project_settings
 from jug_hpc.jugstate import STATES, TaskCounts
-from jug_hpc.schedulers import JobId, JobState, JobStatus
+from jug_hpc.schedulers import JobId, JobOutcome, JobState, JobStatus, Outcome
 from jug_hpc.state import JobRecord
 from jug_hpc.submitter import (
+    MAX_FAILED_JOBS,
     SUBMIT_GRACE,
     Progress,
     active_submitter_jobs,
@@ -17,7 +18,9 @@ from jug_hpc.submitter import (
     is_settled,
     jobs_to_query,
     progress,
+    stopped_classes,
     submitter_jobs,
+    update_failing,
     workers_to_submit,
 )
 
@@ -136,6 +139,13 @@ def test_workers_to_submit_keeps_class_order():
     assert list(workers_to_submit(by_class, {}, limits)) == ['b', 'a', 'default']
 
 
+def test_workers_to_submit_skips_stopped_classes():
+    by_class = {'a': TaskCounts(ready=3), 'default': TaskCounts(ready=2)}
+    limits = {'a': 5, 'default': 5}
+    assert workers_to_submit(by_class, {}, limits, stopped={'a'}) == {'default': 2}
+    assert workers_to_submit(by_class, {}, limits, stopped={'a': ()}) == {'default': 2}
+
+
 def test_workers_to_submit_ignores_unconfigured_classes():
     # jobs of a class since removed from jug_hpc.toml
     by_class = {'default': TaskCounts(ready=2)}
@@ -175,6 +185,59 @@ match = "merge"
                                                   ('default', 10)]
 
 
+# --- update_failing / stopped_classes ---------------------------------------------
+
+FAILED = JobOutcome(Outcome.FAILED, 127, None, 'exit status 127')
+OK = JobOutcome(Outcome.SUCCESS, 0)
+
+
+def test_update_failing_collects_failed_jobs():
+    by_class = {'a': TaskCounts(ready=3), 'default': TaskCounts(ready=1)}
+    f = update_failing({}, by_class, None, [])
+    assert f == {}
+    jobs = [(record('1', 'a'), FAILED), (record('2'), FAILED), (record('3', 'a'), FAILED)]
+    f = update_failing(f, by_class, by_class, jobs)
+    assert f == {'a': (jobs[0], jobs[2]), 'default': (jobs[1],)}
+    more = [(record('4', 'a'), JobOutcome(Outcome.KILLED_MEMORY, 271, 9))]
+    f = update_failing(f, by_class, by_class, more)
+    assert f == {'a': (jobs[0], jobs[2], more[0]), 'default': (jobs[1],)}
+    assert stopped_classes(f) == {'a': f['a']}
+    assert stopped_classes(f, limit=1) == f
+    assert stopped_classes(f, limit=4) == {}
+
+
+def test_update_failing_reset_by_ended_tasks():
+    before = {'a': TaskCounts(ready=3), 'default': TaskCounts(ready=2)}
+    failing = {'a': ((record('1', 'a'), FAILED),), 'default': ((record('2'), FAILED),)}
+    # a task of a finished, one of default failed: both lists are dropped, and
+    # this poll's failures are not counted
+    after = {'a': TaskCounts(ready=2, finished=1), 'default': TaskCounts(ready=1, failed=1)}
+    new = [(record('3', 'a'), FAILED), (record('4'), FAILED)]
+    assert update_failing(failing, after, before, new) == {}
+    # fewer ended tasks (e.g. after 'jug invalidate') is not progress
+    after = {'a': TaskCounts(ready=3), 'default': TaskCounts(ready=2)}
+    before_more = {'a': TaskCounts(finished=3), 'default': TaskCounts(ready=2)}
+    assert update_failing(failing, after, before_more, []) == failing
+
+
+def test_update_failing_reset_by_success():
+    by_class = {'a': TaskCounts(ready=3)}
+    failing = {'a': ((record('1', 'a'), FAILED), (record('2', 'a'), FAILED))}
+    later = (record('4', 'a'), FAILED)
+    assert update_failing(failing, by_class, by_class,
+                          [(record('3', 'a'), OK), later]) == {'a': (later,)}
+    assert update_failing(failing, by_class, by_class,
+                          [later, (record('3', 'a'), OK)]) == {}
+
+
+def test_update_failing_first_poll_and_new_classes():
+    # without earlier counts, nothing counts as progress
+    by_class = {'a': TaskCounts(finished=3, ready=1)}
+    job = (record('1', 'a'), FAILED)
+    assert update_failing({}, by_class, None, [job]) == {'a': (job,)}
+    assert update_failing({}, by_class, {}, [job]) == {'a': (job,)}
+
+
 # --- progress -------------------------------------------------------------------
 
 def test_progress_finished():
@@ -209,6 +272,27 @@ def test_progress_barrier():
     # failed tasks before the barrier block it like any other
     by_class = {'default': TaskCounts(finished=3, failed=1)}
     assert progress(by_class, hit_barrier=True).progress is Progress.BLOCKED
+
+
+def test_progress_stalled():
+    jobs = tuple((record(str(i), 'a'), FAILED) for i in range(MAX_FAILED_JOBS))
+    by_class = {'a': TaskCounts(ready=3), 'default': TaskCounts(finished=2, failed=1)}
+    r = progress(by_class, stalled={'a': jobs})
+    assert r.progress is Progress.STALLED
+    assert r.stalled == {'a': jobs}
+    assert r.failed == {'default': 1}
+    # other ready or running tasks keep it going
+    for c in (TaskCounts(ready=1), TaskCounts(running=1)):
+        r = progress({**by_class, 'default': c}, stalled={'a': jobs})
+        assert r.progress is Progress.RUNNING
+        assert r.stalled == {}
+    # a stopped class with no ready task does not matter
+    by_class = {'a': TaskCounts(finished=3), 'default': TaskCounts(finished=1)}
+    assert progress(by_class, stalled={'a': jobs}).progress is Progress.FINISHED
+    by_class = {'a': TaskCounts(failed=1), 'default': TaskCounts(waiting=1)}
+    r = progress(by_class, stalled={'a': jobs, 'old': jobs})
+    assert r.progress is Progress.BLOCKED
+    assert r.stalled == {}
 
 
 def test_progress_waiting_without_cause():
