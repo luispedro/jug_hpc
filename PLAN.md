@@ -159,13 +159,12 @@ detects them and falls back to the regex otherwise) and `jug status --json`
 linecache `DeprecationWarning` (Jug's jugfile module has no `__spec__`);
 `jugstate.py` suppresses it.
 
-Performance, for Jug: `jug.hash.hash_update` runs `import numpy` on every
-call, and a failed import is not cached, so without numpy installed each call
-searches all of `sys.path`. Loading a 100k-task jugfile without numpy took
-14 s instead of 2 s, and `jug execute`/`jug status` pay the same cost. Fix:
-look numpy up once (e.g. at module level, or `sys.modules.get('numpy')`,
-since an array argument means numpy is already imported). Not yet done in
-`../jug`.
+Performance, fixed in `../jug` (74d9756, unreleased): with Jug 2.7.0,
+`jug.hash.hash_update` runs `import numpy` on every call, and a failed import
+is not cached, so without numpy installed each call searches all of
+`sys.path`. Loading a 100k-task jugfile without numpy took 11–14 s instead of
+about 1.3 s, and `jug execute`/`jug status` pay the same cost. The fix uses
+`sys.modules.get('numpy')`; task hashes do not change.
 
 ## Milestones and steps
 

@@ -24,8 +24,9 @@ it does not load the jugfile again, so it would miss the tasks created after a
 ``barrier()`` and the changes to the jugfile. Measured on a jugfile with 100k
 tasks, a poll takes about 2 s and 150 MB, almost all of it hashing the tasks to
 build the dependency graph, which only loading the jugfile can do.
-(Without numpy installed, Jug 2.7's hashing tries to import numpy for every
-task, which made the same poll take 14 s.)
+(Without numpy installed, Jug 2.7.0's hashing tries to import numpy for
+every task, which made the same poll take 11-14 s; fixed for the next Jug
+release.)
 
 Errors at the first poll are raised at once: they are most likely a problem
 with the settings or the jugfile. Later, a poll that fails because the
