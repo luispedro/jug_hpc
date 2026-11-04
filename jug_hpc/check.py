@@ -9,6 +9,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 from .classes import Classifier, classify, selector
+from .config.project import jugdir_problem
 
 __all__ = [
     'CheckReport',
@@ -33,7 +34,8 @@ class CheckReport:
     errors : list of str
         One per task name matched by several classes
     warnings : list of str
-        One per class that matches no task
+        One per class that matches no task, and one if workers cannot share
+        the jugdir (``jug-hpc submit`` would refuse it)
     notes : list of str
         Informational (e.g. the task list stops at a barrier)
     '''
@@ -68,6 +70,9 @@ def check(settings, state):
 
     errors = [str(e) for e in c.errors]
     warnings = []
+    problem = jugdir_problem(settings)
+    if problem is not None:
+        warnings.append(f'{problem} (jug-hpc submit will refuse it)')
     for name in c.unused():
         rc = settings.classes[name]
         msg = f'{settings.path}: [class.{name}] ({selector(rc)}) matches no task'

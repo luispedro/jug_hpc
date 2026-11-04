@@ -204,6 +204,17 @@ def test_check_barrier_note(check_project, capsys):
     assert err.startswith('jug-hpc: note: loading stopped at a barrier()')
 
 
+def test_check_dict_store_warning(check_project, capsys):
+    write_toml(check_project)
+    toml = check_project / 'jug_hpc.toml'
+    toml.write_text('jugdir = "dict_store"\n' + toml.read_text())
+    assert main(['-C', str(check_project), 'check']) == 0
+    out, err = capsys.readouterr()
+    assert '[default]  (3 tasks)' in out
+    assert err.startswith(f"jug-hpc: warning: {toml}: 'jugdir' is 'dict_store'")
+    assert err.rstrip('\n').endswith('(jug-hpc submit will refuse it)')
+
+
 def test_check_no_project(tmp_path, capsys):
     assert main(['-C', str(tmp_path), 'check']) == 1
     err = capsys.readouterr().err

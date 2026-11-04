@@ -107,7 +107,6 @@ def test_count_column_is_aligned(project, tmp_path):
     assert r.text.splitlines()[-2:] == ['  12  many.f', '   1  many.g']
 
 
-
 @pytest.mark.parametrize('jugdir', ['dict_store', 'file_keepalive:store'])
 def test_jugdir_backend(tmp_path, jugdir):
     shutil.copytree(JUGFILES, tmp_path, dirs_exist_ok=True)
@@ -119,3 +118,28 @@ def test_jugdir_backend(tmp_path, jugdir):
     r = check(settings, state)
     assert r.ok
     assert r.classification.total('default') == 7
+
+
+@pytest.mark.parametrize('jugdir', ['dict_store', 'dict_store:results.pkl'])
+def test_dict_store_is_a_warning(tmp_path, jugdir):
+    shutil.copytree(JUGFILES, tmp_path, dirs_exist_ok=True)
+    (tmp_path / 'jug_hpc.toml').write_text(
+        f'jugfile = "simple.py"\njugdir = "{jugdir}"\n{DEFAULT}')
+    settings = load_project_settings(tmp_path)
+    r = check(settings, load_project(settings))
+    assert r.ok
+    assert len(r.warnings) == 1
+    assert "'jugdir' is" in r.warnings[0]
+    assert 'cannot share' in r.warnings[0]
+    assert r.warnings[0].startswith(str(tmp_path / 'jug_hpc.toml'))
+    assert r.warnings[0].endswith('(jug-hpc submit will refuse it)')
+
+
+@pytest.mark.parametrize('jugdir', ['data.jugdata', 'file_keepalive:data'])
+def test_shareable_jugdir_no_warning(tmp_path, jugdir):
+    shutil.copytree(JUGFILES, tmp_path, dirs_exist_ok=True)
+    (tmp_path / 'jug_hpc.toml').write_text(
+        f'jugfile = "simple.py"\njugdir = "{jugdir}"\n{DEFAULT}')
+    settings = load_project_settings(tmp_path)
+    r = check(settings, load_project(settings))
+    assert r.warnings == []

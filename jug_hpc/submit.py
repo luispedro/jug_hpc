@@ -35,7 +35,7 @@ from pathlib import Path
 
 from .classes import Classifier, classify
 from .config.errors import ConfigError
-from .config.project import split_jugdir
+from .config.project import jugdir_problem
 from .schedulers.checks import check_scheduler_settings
 from .script import jug_execute_command
 from .state import StateError
@@ -120,14 +120,9 @@ def check_jugdir(project):
         For ``dict_store`` and ``dict_store:<file>``: every worker would keep
         its own copy of the store in memory
     '''
-    if project.jugdir is None:
-        return
-    prefix, _ = split_jugdir(project.jugdir)
-    if prefix.startswith('dict_store'):
-        raise ConfigError(
-            f"{project.path}: 'jugdir' is {str(project.jugdir)!r}, which workers "
-            'cannot share (each would keep its own copy of the results in memory); '
-            'use a directory, file_keepalive:<directory> or redis:')
+    problem = jugdir_problem(project)
+    if problem is not None:
+        raise ConfigError(problem)
 
 
 def prepare(cluster, project, state, scheduler, *, classes=None, jug='jug'):

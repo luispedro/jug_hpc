@@ -301,8 +301,8 @@ Notes for the remaining steps:
   named on the command line. Tasks are counted whether finished or not.
   Submit commands use the script path relative to the project directory, so
   `--dry-run` prints the exact commands. A job submitted but not recorded is
-  reported with its ID. Still to do: `check` should warn about `dict_store`
-  jugdirs (see milestone 4, step 6).
+  reported with its ID. `check` warns about `dict_store` jugdirs (the
+  message comes from `config.jugdir_problem`, shared with `submit`).
 - Fake PBS (`tests/fake_pbs/qsub`, done; `tests/test_fake_pbs.py`): a bash
   `qsub` put on `PATH` that logs its cwd and arguments, gives out job IDs
   `1001.fakepbs` / `1001[].fakepbs`, and runs the job before returning the way
@@ -367,6 +367,8 @@ dependencies. → **Release 0.2.**
    Jug's lock removal) rather than removing them silently. Recommend the
    `file_keepalive` backend in the docs and in `check`.
 6. Warn in `check` when the jugdir backend can't detect dead workers.
+   (`dict_store`, which workers cannot share at all, is already a warning in
+   `check` and an error in `submit`.)
 
 **Done when:** a test jugfile with a task that exceeds its memory and one that
 exceeds its wall time produces a correct per-class report on PBS. →

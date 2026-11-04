@@ -38,6 +38,7 @@ __all__ = [
     'ProjectSettings',
     'ResourceClass',
     'find_project_dir',
+    'jugdir_problem',
     'load_project_settings',
     'split_jugdir',
 ]
@@ -112,6 +113,34 @@ def split_jugdir(jugdir):
     if jugdir == 'dict_store':
         return 'dict_store', None
     return '', jugdir
+
+
+def jugdir_problem(settings):
+    '''Why concurrent workers cannot share the project's jugdir, if they cannot
+
+    ``dict_store`` and ``dict_store:<file>`` keep the results in the memory of
+    each process, so every worker would have its own copy. ``jug-hpc submit``
+    refuses such a jugdir and ``jug-hpc check`` warns about it.
+
+    Parameters
+    ----------
+    settings : ProjectSettings
+
+    Returns
+    -------
+    str or None
+        The problem, naming the file and key; None if the jugdir can be shared
+        (also for the default jugdir)
+    '''
+    if settings.jugdir is None:
+        return None
+    prefix, _ = split_jugdir(settings.jugdir)
+    if prefix.startswith('dict_store'):
+        return (
+            f"{settings.path}: 'jugdir' is {str(settings.jugdir)!r}, which workers "
+            'cannot share (each would keep its own copy of the results in memory); '
+            'use a directory, file_keepalive:<directory> or redis:')
+    return None
 
 
 @dataclass(frozen=True)
