@@ -1,0 +1,97 @@
+#!/bin/bash
+# A fake PBS qsub for the tests (see tests/test_fake_pbs.py).
+#
+# Usage: qsub SCRIPT. State lives in $FAKE_PBS_DIR:
+#
+#   qsub.log            one line per call: cwd, then the arguments (tab-separated)
+#   last_id             the last job number given out (jobs start at 1001)
+#   home/               the jobs' working directory (PBS starts jobs in $HOME)
+#   jobs/<n>.sh         the job's copy of the script (qsub copies it, too)
+#   jobs/<n>[-<i>].exit exit status of the job (of array element <i>)
+#   fail                if it exists, qsub prints its contents to stderr and
+#                       exits with status 1 without submitting
+#
+# Like PBS, it reads the #PBS directives before the first non-comment line:
+# -J 1-<n> makes an array job (output "<n>[].fakepbs", one run per index), and
+# -o/-e name the directory for the job's own output, which must exist when the
+# job ends (relative paths are taken from the submission directory). Unlike
+# PBS, it runs the job (every array element at once) before returning, with a
+# clean environment (only HOME, PATH=/usr/bin:/bin and PBS's variables), so a
+# test does not have to wait for it. Its output files are named
+# <n>[-<i>].OU/.ER (PBS's names differ).
+set -eu
+
+: "${FAKE_PBS_DIR:?FAKE_PBS_DIR is not set}"
+mkdir -p "$FAKE_PBS_DIR/jobs" "$FAKE_PBS_DIR/home"
+(IFS=$'\t'; printf '%s\t%s\n' "$PWD" "$*") >>"$FAKE_PBS_DIR/qsub.log"
+
+if [ -e "$FAKE_PBS_DIR/fail" ]; then
+    cat "$FAKE_PBS_DIR/fail" >&2
+    exit 1
+fi
+if [ $# -ne 1 ]; then
+    echo "qsub (fake): expected one argument, the script, got: $*" >&2
+    exit 2
+fi
+if [ ! -f "$1" ]; then
+    echo "qsub (fake): no such script: $1" >&2
+    exit 2
+fi
+
+submitdir=$PWD
+n=$(( $(cat "$FAKE_PBS_DIR/last_id" 2>/dev/null || echo 1000) + 1 ))
+echo "$n" >"$FAKE_PBS_DIR/last_id"
+script="$FAKE_PBS_DIR/jobs/$n.sh"
+cp -- "$1" "$script"
+
+directive() {    # the value of the first '#PBS <option>' directive, if any
+    awk -v opt="$1" '
+        !/^#/ { exit }
+        $1 == "#PBS" && $2 == opt { print $3; exit }' "$script"
+}
+absolute() {     # a -o/-e path, relative to the submission directory
+    case "$1" in
+        /*) echo "$1" ;;
+        *) echo "$submitdir/$1" ;;
+    esac
+}
+array=$(directive -J)
+out=$(absolute "$(directive -o)")
+err=$(absolute "$(directive -e)")
+
+run() {          # run one job or array element: run <PBS_JOBID> <name> [<index>]
+    local status=0
+    (
+        cd "$FAKE_PBS_DIR/home"
+        exec env -i HOME="$FAKE_PBS_DIR/home" PATH=/usr/bin:/bin \
+            PBS_JOBID="$1" PBS_O_WORKDIR="$submitdir" ${3:+PBS_ARRAY_INDEX="$3"} \
+            timeout 120 bash "$script"
+    ) >"$FAKE_PBS_DIR/jobs/$2.stdout" 2>"$FAKE_PBS_DIR/jobs/$2.stderr" || status=$?
+    # deliver the output files, as PBS does when the job ends
+    if [ -d "$out" ] && [ -d "$err" ]; then
+        mv "$FAKE_PBS_DIR/jobs/$2.stdout" "$out/$2.OU"
+        mv "$FAKE_PBS_DIR/jobs/$2.stderr" "$err/$2.ER"
+    else
+        status=255      # undeliverable output
+    fi
+    echo "$status" >"$FAKE_PBS_DIR/jobs/$2.exit"
+}
+
+if [ -z "$array" ]; then
+    run "$n.fakepbs" "$n"
+    echo "$n.fakepbs"
+else
+    case "$array" in
+        1-[0-9]*) last=${array#1-} ;;
+        *) echo "qsub (fake): unsupported -J value: $array" >&2; exit 2 ;;
+    esac
+    if [ "$last" -lt 2 ]; then
+        echo "qsub (fake): single-element array" >&2   # some PBS sites reject them
+        exit 2
+    fi
+    for i in $(seq 1 "$last"); do
+        run "$n[$i].fakepbs" "$n-$i" "$i" &
+    done
+    wait
+    echo "$n[].fakepbs"
+fi

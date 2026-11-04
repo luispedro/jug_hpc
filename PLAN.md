@@ -303,6 +303,16 @@ Notes for the remaining steps:
   `--dry-run` prints the exact commands. A job submitted but not recorded is
   reported with its ID. Still to do: `check` should warn about `dict_store`
   jugdirs (see milestone 4, step 6).
+- Fake PBS (`tests/fake_pbs/qsub`, done; `tests/test_fake_pbs.py`): a bash
+  `qsub` put on `PATH` that logs its cwd and arguments, gives out job IDs
+  `1001.fakepbs` / `1001[].fakepbs`, and runs the job before returning the way
+  PBS would (from `$HOME`, `env -i` with only `HOME`, `PATH=/usr/bin:/bin` and
+  `PBS_*`, one run per `-J` index, output delivered to the `-o`/`-e`
+  directories, exit status per element in `jobs/<n>[-<i>].exit`). Tests:
+  `submit --all` runs a three-class jugfile to completion; the `--dry-run`
+  commands run by hand in a shell do the same; a failing `qsub`. A fake
+  `qstat` (replaying recorded `qstat -f -F json` output) comes with `query()`
+  in milestone 3. Still to do: the manual test on a real PBS cluster.
 
 **Done when:** `--dry-run` output can be submitted by hand on a real PBS
 cluster and runs a one-class jugfile to completion. → **Release 0.1.**

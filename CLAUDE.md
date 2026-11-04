@@ -114,4 +114,7 @@ required because TOML is read with `tomllib`; Jug is the only runtime dependency
   `tests/jugfiles/` and are copied into `tmp_path` per test. Cluster config is isolated with
   `monkeypatch.setenv('XDG_CONFIG_HOME', ...)` or an explicit `environ=` argument; the
   scheduler registry is faked by monkeypatching `schedulers.base._entry_points`.
+- `tests/fake_pbs/qsub` is a fake `qsub` (put on `PATH`, state in `$FAKE_PBS_DIR`) that runs
+  each job synchronously in a clean, PBS-like environment; `tests/test_fake_pbs.py` uses it
+  for end-to-end PBS tests. Its header comment documents its behaviour.
 - Commit messages are short imperative summaries (`Add ...`, `Keep ...`).
