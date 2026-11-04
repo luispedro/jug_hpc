@@ -250,10 +250,17 @@ Notes for the remaining steps:
   `[class.x.pbs]`, in `jug-hpc config` and in `submit`. Not before: with no
   backend registered it would break `config`. `check` stays independent of
   the cluster settings.
-- PBS `validate_raw_options`: only `select`/`resources` tables and a
-  `directives` list of strings.
-- PBS `ScriptVars`: job ID probably `${PBS_JOBID%%.*}`; decide what array
-  jobs give (`1234[2].server`; maybe `PBS_ARRAY_ID`), index `$PBS_ARRAY_INDEX`.
+- PBS backend (`schedulers/pbs.py`, done; its docstring has the details): raw
+  `select`/`resources` tables may not set `ncpus`/`mem`/`walltime`/`select`
+  (those come from `cpus`/`memory`/`time`); `directives` entries get `#PBS `
+  prepended unless present. Job ID in the script is `${PBS_JOBID%%[.[]*}` (`1234`
+  from both `1234.server` and `1234[2].server`), index `$PBS_ARRAY_INDEX`.
+  `-o`/`-e` are `logs/scheduler/` relative to the project dir (qsub resolves
+  them against its cwd, which is the project dir), so spaces in the project
+  path don't matter. To check on a real cluster: that a directory is accepted
+  for `-o`/`-e`, that single-element arrays are avoided correctly, and the
+  `qsub` output format. `query`/`outcome`/`cancel` raise NotImplementedError
+  (milestones 3–4).
 - `submit` must create `logs/` and `logs/scheduler/` before `qsub` (the
   script's `mkdir -p` is too late for PBS's own `-o`/`-e`).
 - `submit` should pass the jugfile's task names to `selector_args`, so the

@@ -182,7 +182,9 @@ def render_body(spec, variables):
         'export ' + ' '.join(exports),
     ]
     for snippet in spec.setup:
-        lines += ['', snippet.rstrip('\n'), '']
+        lines += ['', snippet.strip('\n')]
+    if spec.setup:
+        lines.append('')
     lines += [
         'unset JUG_MAX_HOURS JUG_MAX_MINUTES',
         f'export JUG_MAX_SECONDS={int(spec.max_seconds)}',

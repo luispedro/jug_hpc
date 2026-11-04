@@ -39,6 +39,9 @@ Homepage = "https://github.com/luispedro/jug_hpc"
 [project.scripts]
 jug-hpc = "jug_hpc.cli:main"
 
+[project.entry-points."jug_hpc.schedulers"]
+pbs = "jug_hpc.schedulers.pbs:PBSScheduler"
+
 [dependency-groups]
 dev = [
   "hypothesis>=6.170.14",

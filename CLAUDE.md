@@ -10,8 +10,8 @@ read `GOALS.md` (design, principles) and `PLAN.md` (architecture, milestones, de
 before making design-level changes. PLAN.md is the source of truth for what comes next.
 
 Current state: milestone 1 (`config`, `check`) is done; milestone 2 is in progress
-(`schedulers/base.py`, `runner.py`, `worker.py`, `script.py`, `selection.py` exist;
-`schedulers/pbs.py`, `schedulers/local.py`, `state.py`, `submitter.py` and `jug-hpc submit`
+(`schedulers/base.py`, `schedulers/pbs.py`, `runner.py`, `worker.py`, `script.py`,
+`selection.py` exist; `schedulers/local.py`, `state.py`, `submitter.py` and `jug-hpc submit`
 do not yet).
 
 ## Commands
@@ -91,7 +91,9 @@ required because TOML is read with `tomllib`; Jug is the only runtime dependency
 
 - Docstrings use `'''` and numpydoc sections (Parameters / Returns / Raises); string
   literals use single quotes. Modules declare `__all__`.
-- Tests: pytest + hypothesis (property tests, e.g. unit round-trips). Test jugfiles live in
+- Tests: pytest + hypothesis (property tests, e.g. unit round-trips). Golden files for
+  rendered scripts live in `tests/golden/<backend>/`; regenerate with
+  `JUG_HPC_UPDATE_GOLDEN=1 uv run pytest` and review the diff. Test jugfiles live in
   `tests/jugfiles/` and are copied into `tmp_path` per test. Cluster config is isolated with
   `monkeypatch.setenv('XDG_CONFIG_HOME', ...)` or an explicit `environ=` argument; the
   scheduler registry is faked by monkeypatching `schedulers.base._entry_points`.
