@@ -142,9 +142,16 @@ required because TOML is read with `tomllib`; Jug is the only runtime dependency
   `tests/jugfiles/` and are copied into `tmp_path` per test. Cluster config is isolated with
   `monkeypatch.setenv('XDG_CONFIG_HOME', ...)` or an explicit `environ=` argument; the
   scheduler registry is faked by monkeypatching `schedulers.base._entry_points`.
+  A `redis://` jugdir can't be used in tests that load the jugfile (Jug connects).
+- End-to-end tests of the submitter use the local backend through
+  `tests/test_poll.py::local_project` (local jobs go to `XDG_STATE_HOME` in `tmp_path`).
+  They are the slow tests: a worker may wait one Jug wait cycle (12 s) for its last task.
 - `tests/fake_pbs/qsub` is a fake `qsub` (put on `PATH`, state in `$FAKE_PBS_DIR`) that runs
   each job synchronously in a clean, PBS-like environment (or holds it, if a `hold` file
   exists); `tests/fake_pbs/qstat` serves `qstat -f -F json [-x]` for its jobs.
   `tests/test_fake_pbs.py` uses them for end-to-end PBS tests. Their header comments document
   their behaviour. Sample PBS command output for unit tests lives in `tests/pbs_output/`.
+  Because of the clean environment, projects there need `setup = "export PATH=<venv
+  bin>:$PATH"`, and a job can't run `qsub` itself (`env -i` drops `FAKE_PBS_DIR`), so
+  `submit --as-job` has no fake-PBS end-to-end test. There is no fake `qdel`/`qrls`.
 - Commit messages are short imperative summaries (`Add ...`, `Keep ...`).
