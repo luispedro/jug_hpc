@@ -64,14 +64,23 @@ from ..config.errors import ConfigError
 from ..runner import CommandError
 from ..script import ScriptVars, render_script
 from ..units import format_hms, format_memory
-from .base import JobId, JobOutcome, JobState, JobStatus, Outcome, Scheduler, SchedulerError
+from .base import (
+    JobId,
+    JobOutcome,
+    JobState,
+    JobStatus,
+    Outcome,
+    Scheduler,
+    SchedulerError,
+    combine_outcomes,
+    signal_name,
+)
 
 __all__ = [
     'KILL_GRACE',
     'POLL_INTERVAL',
     'SCRIPT_VARS',
     'LocalScheduler',
-    'combine_outcomes',
     'default_jobs_dir',
     'element_outcome',
     'header_lines',
@@ -95,11 +104,6 @@ SCRIPT_VARS = ScriptVars(job_id='${JUG_HPC_LOCAL_JOB_ID:-$$}',
 _MODULE = 'jug_hpc.schedulers.local'
 
 _JOB_ID_RE = re.compile(r'[1-9][0-9]*\Z')
-
-#: How bad each outcome is, for summarizing an array (worst first)
-_SEVERITY = [Outcome.KILLED_MEMORY, Outcome.KILLED_TIME, Outcome.KILLED_SIGNAL,
-             Outcome.FAILED, Outcome.UNKNOWN, Outcome.SUCCESS]
-
 
 def default_jobs_dir(environ=None):
     '''``$XDG_STATE_HOME/jug_hpc/local`` (``~/.local/state/jug_hpc/local``)'''
@@ -177,44 +181,8 @@ def element_outcome(record):
     if rc == 0:
         return JobOutcome(Outcome.SUCCESS, 0)
     if rc < 0:
-        return JobOutcome(Outcome.KILLED_SIGNAL, None, signum, f'killed by {_signame(signum)}')
+        return JobOutcome(Outcome.KILLED_SIGNAL, None, signum, f'killed by {signal_name(signum)}')
     return JobOutcome(Outcome.FAILED, rc, None, f'exit status {rc}')
-
-
-def _signame(signum):
-    try:
-        return signal.Signals(signum).name
-    except ValueError:
-        return f'signal {signum}'
-
-
-def combine_outcomes(outcomes):
-    '''The outcome of a job from those of its workers: the worst one
-
-    Parameters
-    ----------
-    outcomes : dict
-        Array index (int) -> JobOutcome
-
-    Returns
-    -------
-    outcome : JobOutcome
-        For one worker, its own outcome. For several, the worst one, with a
-        detail that lists every worker that did not succeed.
-    '''
-    if not outcomes:
-        return JobOutcome(Outcome.UNKNOWN, detail='no workers recorded')
-    if len(outcomes) == 1:
-        return next(iter(outcomes.values()))
-    order = sorted(outcomes, key=lambda i: (_SEVERITY.index(outcomes[i].outcome), i))
-    worst = outcomes[order[0]]
-    if worst.outcome is Outcome.SUCCESS:
-        return JobOutcome(Outcome.SUCCESS, 0)
-    failed = [i for i in sorted(outcomes) if outcomes[i].outcome is not Outcome.SUCCESS]
-    detail = '; '.join(f'worker {i}: {outcomes[i].detail or outcomes[i].outcome.value}'
-                       for i in failed)
-    return JobOutcome(worst.outcome, worst.exit_code, worst.signal,
-                      f'{len(failed)} of {len(outcomes)} workers did not succeed ({detail})')
 
 
 def parse_status_output(stdout):

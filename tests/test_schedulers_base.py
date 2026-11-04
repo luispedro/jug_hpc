@@ -7,12 +7,15 @@ from jug_hpc.config import ClusterSettings, ConfigError
 from jug_hpc.runner import FakeRunner, SubprocessRunner
 from jug_hpc.schedulers import (
     JobId,
+    JobOutcome,
     JobState,
     JobStatus,
+    Outcome,
     Scheduler,
     SchedulerError,
     UnknownSchedulerError,
     base,
+    combine_outcomes,
     create_scheduler,
     get_scheduler,
     scheduler_names,
@@ -165,3 +168,16 @@ def test_job_status():
     assert JobStatus(JobState.RUNNING, queued=2, running=3).active == 5
     with pytest.raises(ValueError, match='negative'):
         JobStatus(JobState.RUNNING, running=-1)
+
+
+def test_combine_outcomes():
+    ok = JobOutcome(Outcome.SUCCESS, 0)
+    failed = JobOutcome(Outcome.FAILED, 1, None, 'exit status 1')
+    timed_out = JobOutcome(Outcome.KILLED_TIME, None, 15, 'killed: wall time limit reached')
+    assert combine_outcomes({}).outcome is Outcome.UNKNOWN
+    assert combine_outcomes({1: failed}) == failed
+    assert combine_outcomes({1: ok, 2: ok}) == ok
+    assert combine_outcomes({1: ok, 2: failed, 3: timed_out, 4: failed}) == JobOutcome(
+        Outcome.KILLED_TIME, None, 15,
+        '3 of 4 workers did not succeed (worker 2: exit status 1; '
+        'worker 3: killed: wall time limit reached; worker 4: exit status 1)')

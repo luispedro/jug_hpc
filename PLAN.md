@@ -121,9 +121,11 @@ The job header, arrays, memory units and the three raw-option keys
   Torque support is out of scope for 1.0 but must be possible as a separate
   backend.
 - Job outcome: PBS `Exit_status`, where negative values are PBS's own codes
-  (including walltime and memory kills) and values above 256 mean "killed by
-  signal". The exact codes are taken from the PBS documentation and checked
-  on a real cluster before being relied on.
+  (including walltime and memory kills, `pbs.PBS_EXIT_CODES`) and values of
+  256 or more mean "killed by signal `Exit_status % 256`". A failed job that
+  used at least its requested walltime counts as a wall-time kill. The codes
+  are taken from the PBS documentation and OpenPBS's `job.h`; still to be
+  checked on a real cluster (milestone 3, item 7).
 
 The rest (what raw tables may set, the job-ID expression, `-o`/`-e` paths,
 `qstat` error handling) is in `pbs.py`'s docstring.
@@ -246,6 +248,11 @@ Remaining:
      that the JSON is valid (older PBS versions had escaping bugs; parsing
      already uses `strict=False`), the attribute names, and qstat's exit
      status and messages for unknown jobs;
+   - the same with `-t` for job outcomes (replacing the modelled
+     `qstat-f-json-xt.json`): that finished array elements are listed with
+     `Exit_status`, and the actual `Exit_status` of a job killed for memory
+     (cgroups or MoM enforcement), for wall time, by `qdel`, and of an array
+     with a deleted element;
    - plain `jug-hpc submit` and `--as-job`: that compute nodes may run
      `qsub`/`qstat`, and that the job finds the same `cluster.toml` (a
      non-default `XDG_CONFIG_HOME` is not passed to PBS jobs).
@@ -265,11 +272,12 @@ CPUs of the worker that ran them).
 2. `jug-hpc cancel`: cancel every job recorded for the project, including the
    submitter job. (The fake PBS has no `qdel`/`qrls` yet: held jobs stay
    held.)
-3. `outcome()` in the PBS backend: exit status of finished jobs, classified
-   as success / failed / killed for memory / killed for wall time / other
-   signal. The local backend gives an array its worst worker's outcome
-   (`local.combine_outcomes`); PBS may want the same rule, moved to
-   `base.py`.
+3. Done: `outcome()` in the PBS backend (`qstat -f -F json -x -t`, so array
+   elements are listed with their own `Exit_status`; codes and the wall-time
+   heuristic in `pbs.py`'s docstring). Arrays get their worst worker's
+   outcome in both backends (`base.combine_outcomes`). Jobs not finished or
+   unknown are left out of the result. Nothing calls `outcome()` yet (steps
+   4 and 8 will).
 4. Report jobs killed by the scheduler, broken down by class, in `status` and
    in the submitter's log, with a suggestion (raise `memory`, raise `time`, or
    lower `time_fraction`).

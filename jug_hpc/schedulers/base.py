@@ -17,6 +17,7 @@ parsing output) apart from side effects, which go through
 '''
 import difflib
 import enum
+import signal
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from importlib.metadata import entry_points
@@ -27,6 +28,7 @@ from ..runner import CommandError, SubprocessRunner
 
 __all__ = [
     'ENTRY_POINT_GROUP',
+    'OUTCOME_SEVERITY',
     'JobId',
     'JobOutcome',
     'JobState',
@@ -35,9 +37,11 @@ __all__ = [
     'Scheduler',
     'SchedulerError',
     'UnknownSchedulerError',
+    'combine_outcomes',
     'create_scheduler',
     'get_scheduler',
     'scheduler_names',
+    'signal_name',
 ]
 
 ENTRY_POINT_GROUP = 'jug_hpc.schedulers'
@@ -115,6 +119,49 @@ class JobOutcome:
     exit_code: int | None = None
     signal: int | None = None
     detail: str = ''
+
+
+def signal_name(signum):
+    '''The name of signal ``signum`` (``'SIGKILL'``), or ``'signal <n>'``'''
+    try:
+        return signal.Signals(signum).name
+    except ValueError:
+        return f'signal {signum}'
+
+
+#: How bad each outcome is, for summarizing an array (worst first)
+OUTCOME_SEVERITY = (Outcome.KILLED_MEMORY, Outcome.KILLED_TIME, Outcome.KILLED_SIGNAL,
+                    Outcome.FAILED, Outcome.UNKNOWN, Outcome.SUCCESS)
+
+
+def combine_outcomes(outcomes):
+    '''The outcome of a job from those of its workers: the worst one
+
+    Parameters
+    ----------
+    outcomes : dict
+        Array index (int) -> JobOutcome
+
+    Returns
+    -------
+    outcome : JobOutcome
+        For one worker, its own outcome. For several, the worst one (by
+        :data:`OUTCOME_SEVERITY`), with a detail that lists every worker that
+        did not succeed.
+    '''
+    if not outcomes:
+        return JobOutcome(Outcome.UNKNOWN, detail='no workers recorded')
+    if len(outcomes) == 1:
+        return next(iter(outcomes.values()))
+    order = sorted(outcomes, key=lambda i: (OUTCOME_SEVERITY.index(outcomes[i].outcome), i))
+    worst = outcomes[order[0]]
+    if worst.outcome is Outcome.SUCCESS:
+        return JobOutcome(Outcome.SUCCESS, 0)
+    failed = [i for i in sorted(outcomes) if outcomes[i].outcome is not Outcome.SUCCESS]
+    detail = '; '.join(f'worker {i}: {outcomes[i].detail or outcomes[i].outcome.value}'
+                       for i in failed)
+    return JobOutcome(worst.outcome, worst.exit_code, worst.signal,
+                      f'{len(failed)} of {len(outcomes)} workers did not succeed ({detail})')
 
 
 class SchedulerError(Exception):
@@ -235,7 +282,16 @@ class Scheduler(ABC):
 
     @abstractmethod
     def outcome(self, jobs):
-        '''How each finished job ended: dict JobId -> JobOutcome'''
+        '''How each finished job ended: dict JobId -> JobOutcome
+
+        Jobs that have not finished, and jobs the scheduler no longer knows,
+        are left out. An array job's outcome is that of its worst worker
+        (:func:`combine_outcomes`).
+
+        Raises
+        ------
+        SchedulerError
+        '''
 
     @abstractmethod
     def cancel(self, jobs):

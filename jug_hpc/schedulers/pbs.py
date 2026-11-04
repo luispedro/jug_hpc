@@ -49,26 +49,60 @@ many of its workers are queued or running. Jobs that ``qstat`` does not list
 :attr:`~.JobState.UNKNOWN`. Output is matched to the queried IDs by job number
 (``1234`` or ``1234[]``), as the server part of an ID may be written
 differently by ``qsub`` and ``qstat``.
+
+How finished jobs ended (:meth:`PBSScheduler.outcome`) is read from the same
+command with ``-t``, which also lists an array's elements (``1234[1].server``,
+...), each with its own ``Exit_status``. Its meaning (PBS Professional
+reference guide, "Job exit status"):
+
+- ``0``: success; ``1``--``255``: the exit status of the job script (``128 +
+  N`` if the shell saw a command killed by signal ``N``);
+- ``256`` or more: the job script was killed by signal ``Exit_status % 256``;
+- negative: PBS's own codes (:data:`PBS_EXIT_CODES`), e.g. ``-27`` and ``-29``
+  when PBS killed the job for exceeding its memory or wall time.
+
+As a wall time kill often shows as a plain ``SIGTERM``/``SIGKILL`` (``271``,
+``265``), a job that did not succeed and used at least its requested
+``walltime`` (``resources_used`` against ``Resource_List``) counts as killed
+for wall time. An array job without listed elements falls back to the array's
+own ``Exit_status`` (0: every element succeeded; 1: some element failed; 2:
+some element was deleted or PBS failed). An array job's outcome is that of its
+worst element (:func:`~.base.combine_outcomes`). These codes are taken from
+the documentation and OpenPBS's sources, not yet checked on a real cluster.
 '''
 import difflib
 import json
 import os
 import re
+from collections import defaultdict
 
 from ..config.errors import ConfigError
 from ..runner import CommandError
 from ..script import ScriptVars, render_script
 from ..units import format_hms, memory_in_unit
-from .base import JobId, JobState, JobStatus, Scheduler, SchedulerError
+from .base import (
+    JobId,
+    JobOutcome,
+    JobState,
+    JobStatus,
+    Outcome,
+    Scheduler,
+    SchedulerError,
+    combine_outcomes,
+    signal_name,
+)
 
 __all__ = [
     'JOB_NAME_MAX',
     'JOB_STATES',
+    'PBS_EXIT_CODES',
     'QSTAT_BATCH',
     'QSTAT_TIMEOUT',
     'RAW_KEYS',
     'SCRIPT_VARS',
     'PBSScheduler',
+    'array_exit_outcome',
+    'element_outcome',
     'format_memory',
     'header_lines',
     'job_name',
@@ -76,6 +110,7 @@ __all__ = [
     'match_jobs',
     'parse_array_state_count',
     'parse_job_id',
+    'parse_qstat_outcomes',
     'parse_qstat_output',
     'qstat_command',
     'scheduler_log_dir',
@@ -126,6 +161,27 @@ JOB_STATES = {
     'F': JobState.FINISHED,    # finished
     'X': JobState.FINISHED,    # array element: finished
     'M': JobState.UNKNOWN,     # moved to another server
+}
+
+#: PBS's own (negative) exit statuses, as in OpenPBS's ``job.h``: code ->
+#: (Outcome, explanation). Codes not listed are other PBS errors that kept the
+#: job from running (:attr:`Outcome.FAILED`).
+PBS_EXIT_CODES = {
+    -1: (Outcome.FAILED, 'PBS could not run the job'),
+    -2: (Outcome.FAILED, 'PBS could not run the job'),
+    -3: (Outcome.FAILED, 'PBS could not run the job'),
+    -4: (Outcome.FAILED, 'the job was aborted when its execution host restarted'),
+    -10: (Outcome.FAILED, 'PBS could not run the job: invalid user or group'),
+    -17: (Outcome.FAILED, 'a PBS hook rejected the job'),
+    -19: (Outcome.FAILED, 'a PBS hook deleted the job'),
+    -20: (Outcome.FAILED, "the connection to the job's execution host was lost"),
+    -22: (Outcome.FAILED, 'a PBS hook failed or timed out'),
+    -24: (Outcome.KILLED_SIGNAL, 'killed by PBS: used more CPUs than requested'),
+    -25: (Outcome.KILLED_SIGNAL, 'killed by PBS: used more CPUs than requested'),
+    -26: (Outcome.KILLED_MEMORY, 'killed by PBS: virtual memory limit exceeded'),
+    -27: (Outcome.KILLED_MEMORY, 'killed by PBS: memory limit exceeded'),
+    -28: (Outcome.KILLED_SIGNAL, 'killed by PBS: CPU time limit exceeded'),
+    -29: (Outcome.KILLED_TIME, 'killed by PBS: wall time limit exceeded'),
 }
 
 #: Jobs per ``qstat`` call
@@ -247,14 +303,21 @@ def parse_job_id(stdout):
     raise SchedulerError(f'pbs: no job ID in the output of qsub: {stdout.strip()!r}')
 
 
-def qstat_command(jobs):
-    '''The ``qstat`` command line that queries ``jobs``'''
-    return ['qstat', '-f', '-F', 'json', '-x', *jobs]
+def qstat_command(jobs, elements=False):
+    '''The ``qstat`` command line that queries ``jobs``
+
+    With ``elements``, it also lists the elements of array jobs (``-t``).
+    '''
+    return ['qstat', '-f', '-F', 'json', '-x', *(['-t'] if elements else []), *jobs]
 
 
 def _short_id(job_id):
-    '''The job number of a job ID: ``1234`` or ``1234[]`` (no server)'''
+    '''The job number of a job ID: ``1234``, ``1234[]`` or ``1234[5]`` (no server)'''
     return job_id.split('.', 1)[0]
+
+
+def _is_array(job_id, attrs):
+    return attrs.get('array') in ('True', True) or _short_id(job_id).endswith('[]')
 
 
 def parse_array_state_count(text):
@@ -305,7 +368,7 @@ def job_status(job_id, attrs):
     state = JOB_STATES.get(letter)
     if state is None:
         raise ValueError(f'unknown job_state {letter!r}')
-    is_array = attrs.get('array') in ('True', True) or _short_id(job_id).endswith('[]')
+    is_array = _is_array(job_id, attrs)
     if state is JobState.QUEUED and not is_array:
         return JobStatus(state, queued=1)
     if state is JobState.RUNNING and not is_array:
@@ -315,6 +378,34 @@ def job_status(job_id, attrs):
     counts = parse_array_state_count(attrs.get('array_state_count'))
     return JobStatus(state, queued=counts['Queued'],
                      running=counts['Running'] + counts.get('Exiting', 0))
+
+
+def _qstat_jobs(stdout):
+    '''The ``Jobs`` object of ``qstat -f -F json``'s output: JobId -> dict
+
+    Raises
+    ------
+    SchedulerError
+    '''
+    if not stdout.strip():
+        return {}
+    def error(what):
+        return SchedulerError(f'pbs: could not parse the output of qstat ({what})')
+
+    try:
+        # strict=False: some PBS versions leave control characters unescaped
+        data = json.loads(stdout, strict=False)
+    except ValueError as e:
+        raise error(e) from e
+    if not isinstance(data, dict):
+        raise error('not a JSON object')
+    listed = data.get('Jobs', {})
+    if not isinstance(listed, dict):
+        raise error("'Jobs' is not a JSON object")
+    for job_id, attrs in listed.items():
+        if not isinstance(attrs, dict):
+            raise error(f'job {job_id}: its attributes are not a JSON object')
+    return {JobId(j): attrs for j, attrs in listed.items()}
 
 
 def parse_qstat_output(stdout):
@@ -335,30 +426,151 @@ def parse_qstat_output(stdout):
     SchedulerError
         If the output is not understood
     '''
-    if not stdout.strip():
-        return {}
-    def error(what):
-        return SchedulerError(f'pbs: could not parse the output of qstat ({what})')
-
-    try:
-        # strict=False: some PBS versions leave control characters unescaped
-        data = json.loads(stdout, strict=False)
-    except ValueError as e:
-        raise error(e) from e
-    if not isinstance(data, dict):
-        raise error('not a JSON object')
-    listed = data.get('Jobs', {})
-    if not isinstance(listed, dict):
-        raise error("'Jobs' is not a JSON object")
     jobs = {}
-    for job_id, attrs in listed.items():
-        if not isinstance(attrs, dict):
-            raise error(f'job {job_id}: its attributes are not a JSON object')
+    for job_id, attrs in _qstat_jobs(stdout).items():
         try:
-            jobs[JobId(job_id)] = job_status(job_id, attrs)
+            jobs[job_id] = job_status(job_id, attrs)
         except ValueError as e:
-            raise error(f'job {job_id}: {e}') from e
+            raise SchedulerError(
+                f'pbs: could not parse the output of qstat (job {job_id}: {e})') from e
     return jobs
+
+
+_HMS_RE = re.compile(r'(\d+):(\d{2}):(\d{2})\Z')
+
+
+def _seconds(hms):
+    '''``HH:MM:SS`` as seconds, or None'''
+    m = _HMS_RE.match(hms) if isinstance(hms, str) else None
+    return None if m is None else (int(m[1]) * 60 + int(m[2])) * 60 + int(m[3])
+
+
+def _resource(attrs, table, name):
+    value = attrs.get(table)
+    return value.get(name) if isinstance(value, dict) else None
+
+
+def _exit_status(attrs):
+    '''``Exit_status`` as an int, or None'''
+    status = attrs.get('Exit_status')
+    if isinstance(status, str) and re.fullmatch(r'\s*-?\d+\s*', status):
+        return int(status)
+    if isinstance(status, int) and not isinstance(status, bool):
+        return status
+    return None
+
+
+def element_outcome(attrs, limits=None):
+    '''How a finished plain job or array element ended, from its ``qstat`` attributes
+
+    Parameters
+    ----------
+    attrs : dict
+        Its attributes in ``qstat -f -F json -x``: ``Exit_status``, and
+        ``resources_used`` and ``Resource_List`` (for wall time kills)
+    limits : dict, optional
+        The array job's ``Resource_List``, for an element that lists none
+
+    Returns
+    -------
+    outcome : JobOutcome
+    '''
+    status = _exit_status(attrs)
+    if status is None:
+        return JobOutcome(Outcome.UNKNOWN,
+                          detail='no exit status (deleted before it started?)')
+    if status == 0:
+        return JobOutcome(Outcome.SUCCESS, 0)
+    if status < 0:
+        outcome, what = PBS_EXIT_CODES.get(status, (Outcome.FAILED, 'PBS error'))
+        result = JobOutcome(outcome, status, None, f'{what} (Exit_status {status})')
+    elif status >= 256:
+        signum = status % 256
+        detail = f'killed by {signal_name(signum)} (Exit_status {status})'
+        used_mem = _resource(attrs, 'resources_used', 'mem')
+        mem = _resource(attrs, 'Resource_List', 'mem') or (limits or {}).get('mem')
+        if used_mem and mem:
+            detail += f'; memory used: {used_mem} of {mem}'
+        result = JobOutcome(Outcome.KILLED_SIGNAL, status, signum, detail)
+    else:
+        detail = f'exit status {status}'
+        if 128 < status <= 128 + 64:
+            detail += f' (128 + {signal_name(status - 128)})'
+        result = JobOutcome(Outcome.FAILED, status, None, detail)
+    if result.outcome in (Outcome.KILLED_MEMORY, Outcome.KILLED_TIME):
+        return result
+    used = _resource(attrs, 'resources_used', 'walltime')
+    limit = _resource(attrs, 'Resource_List', 'walltime') or (limits or {}).get('walltime')
+    used_s, limit_s = _seconds(used), _seconds(limit)
+    if used_s is not None and limit_s is not None and used_s >= limit_s:
+        return JobOutcome(Outcome.KILLED_TIME, status, result.signal,
+                          f'wall time limit reached (used {used} of {limit}); '
+                          f'{result.detail}')
+    return result
+
+
+def array_exit_outcome(attrs):
+    '''How a finished array job ended, from its own ``Exit_status`` only
+
+    For when ``qstat`` does not list the array's elements.
+    '''
+    status = _exit_status(attrs)
+    if status == 0:
+        return JobOutcome(Outcome.SUCCESS, 0)
+    if status == 1:
+        return JobOutcome(Outcome.FAILED, 1, None, 'some workers failed (Exit_status 1)')
+    detail = 'no exit status' if status is None else (
+        f'some workers were deleted or PBS failed (Exit_status {status})')
+    return JobOutcome(Outcome.UNKNOWN, status, None, detail)
+
+
+_ELEMENT_RE = re.compile(r'(\d+)\[(\d+)\]\Z')
+
+
+def parse_qstat_outcomes(stdout):
+    '''How each finished job listed by ``qstat -f -F json -x -t`` ended
+
+    Parameters
+    ----------
+    stdout : str
+        May be empty
+
+    Returns
+    -------
+    outcomes : dict
+        JobId (as listed) -> JobOutcome, for plain jobs and array jobs that
+        have finished (``job_state`` F); array elements are combined into
+        their array's outcome
+
+    Raises
+    ------
+    SchedulerError
+        If the output is not understood
+    '''
+    jobs = {}
+    elements = defaultdict(dict)        # array job number -> index -> attrs
+    for job_id, attrs in _qstat_jobs(stdout).items():
+        m = _ELEMENT_RE.match(_short_id(job_id))
+        if m:
+            elements[m[1]][int(m[2])] = attrs
+        else:
+            jobs[job_id] = attrs
+    outcomes = {}
+    for job_id, attrs in jobs.items():
+        if attrs.get('job_state') != 'F':
+            continue
+        if not _is_array(job_id, attrs):
+            outcomes[job_id] = element_outcome(attrs)
+            continue
+        listed = elements.get(_short_id(job_id).removesuffix('[]'))
+        if listed:
+            limits = attrs.get('Resource_List')
+            limits = limits if isinstance(limits, dict) else None
+            outcomes[job_id] = combine_outcomes(
+                {i: element_outcome(a, limits) for i, a in listed.items()})
+        else:
+            outcomes[job_id] = array_exit_outcome(attrs)
+    return outcomes
 
 
 def unexpected_qstat_errors(stderr):
@@ -383,10 +595,21 @@ def match_jobs(jobs, found):
         Every job in ``jobs`` -> JobStatus (:attr:`JobState.UNKNOWN` if not
         listed). A job is matched by its full ID, or else by its job number.
     '''
-    by_number = {_short_id(j): s for j, s in found.items()}
+    matched = _matched(jobs, found)
     unknown = JobStatus(JobState.UNKNOWN)
-    return {j: found[j] if j in found else by_number.get(_short_id(j), unknown)
-            for j in jobs}
+    return {j: matched.get(j, unknown) for j in jobs}
+
+
+def _matched(jobs, found):
+    '''``found`` (keyed as listed by ``qstat``) keyed by those of ``jobs`` it has'''
+    by_number = {_short_id(j): v for j, v in found.items()}
+    result = {}
+    for j in jobs:
+        if j in found:
+            result[j] = found[j]
+        elif _short_id(j) in by_number:
+            result[j] = by_number[_short_id(j)]
+    return result
 
 
 def validate_raw_options(raw, where):
@@ -458,11 +681,11 @@ class PBSScheduler(Scheduler):
     def validate_raw_options(cls, raw, where):
         validate_raw_options(raw, where)
 
-    def query(self, jobs):
+    def _qstat(self, jobs, elements=False):
+        '''Run ``qstat`` on ``jobs`` in batches; yields each call's stdout'''
         jobs = list(jobs)
-        found = {}
         for start in range(0, len(jobs), QSTAT_BATCH):
-            argv = qstat_command(jobs[start:start + QSTAT_BATCH])
+            argv = qstat_command(jobs[start:start + QSTAT_BATCH], elements)
             try:
                 result = self.runner.run(argv, check=False, timeout=QSTAT_TIMEOUT)
             except CommandError as e:
@@ -472,11 +695,21 @@ class PBSScheduler(Scheduler):
                                            or not result.stderr.strip()):
                 error = CommandError(argv, result.returncode, result.stdout, result.stderr)
                 raise SchedulerError(f'pbs: could not query jobs: {error}')
-            found.update(parse_qstat_output(result.stdout))
+            yield result.stdout
+
+    def query(self, jobs):
+        jobs = list(jobs)
+        found = {}
+        for stdout in self._qstat(jobs):
+            found.update(parse_qstat_output(stdout))
         return match_jobs(jobs, found)
 
     def outcome(self, jobs):
-        raise NotImplementedError('pbs: job outcomes are not implemented yet')
+        jobs = list(jobs)
+        found = {}
+        for stdout in self._qstat(jobs, elements=True):
+            found.update(parse_qstat_outcomes(stdout))
+        return _matched(jobs, found)
 
     def cancel(self, jobs):
         raise NotImplementedError('pbs: cancelling jobs is not implemented yet')

@@ -19,7 +19,7 @@ import pytest
 from jug_hpc.cli import main
 from jug_hpc.config import ClusterSettings, load_project_settings
 from jug_hpc.jugstate import load_project
-from jug_hpc.schedulers import JobId, JobState, JobStatus
+from jug_hpc.schedulers import JobId, JobOutcome, JobState, JobStatus, Outcome
 from jug_hpc.schedulers.pbs import PBSScheduler
 from jug_hpc.state import ProjectState
 
@@ -215,6 +215,46 @@ def test_query_unknown():
     pbs = PBSScheduler(ClusterSettings(scheduler='pbs'))
     assert pbs.query([JobId('1001.fakepbs'), JobId('77[].fakepbs')]) == {
         '1001.fakepbs': JobStatus(JobState.UNKNOWN), '77[].fakepbs': JobStatus(JobState.UNKNOWN)}
+
+
+def outcomes(project_dir):
+    '''How every job recorded for the project ended, from the fake qstat'''
+    jobs = [r.job_id for r in ProjectState(project_dir).jobs()]
+    return PBSScheduler(ClusterSettings(scheduler='pbs')).outcome(jobs)
+
+
+def test_outcome_success(fake_pbs):
+    project_dir, pbs_dir = fake_pbs
+    assert main(['-C', str(project_dir), 'submit', '--all']) == 0
+    success = JobOutcome(Outcome.SUCCESS, 0)
+    assert outcomes(project_dir) == {
+        '1001[].fakepbs': success, '1002.fakepbs': success, '1003[].fakepbs': success}
+    assert qsub_calls(pbs_dir, 'qstat')[-1][1] == [
+        '-f', '-F', 'json', '-x', '-t', '1001[].fakepbs', '1002.fakepbs', '1003[].fakepbs']
+
+
+def test_outcome_failed_setup(fake_pbs):
+    '''Workers whose setup fails end with its exit status'''
+    project_dir, _ = fake_pbs
+    toml = project_dir / 'jug_hpc.toml'
+    toml.write_text(toml.read_text().replace('setup = "', 'setup = "exit 3; '))
+    assert main(['-C', str(project_dir), 'submit', '--all']) == 0
+    failed = JobOutcome(Outcome.FAILED, 3, None, 'exit status 3')
+    both_failed = JobOutcome(Outcome.FAILED, 3, None, (
+        '2 of 2 workers did not succeed (worker 1: exit status 3; worker 2: exit status 3)'))
+    assert outcomes(project_dir) == {
+        '1001[].fakepbs': both_failed, '1002.fakepbs': failed, '1003[].fakepbs': both_failed}
+
+
+def test_outcome_unknown_and_held(fake_pbs):
+    '''Jobs that have not finished, or are unknown, are left out'''
+    project_dir, pbs_dir = fake_pbs
+    pbs_dir.mkdir()
+    (pbs_dir / 'hold').touch()
+    assert main(['-C', str(project_dir), 'submit', '--all']) == 0
+    jobs = [r.job_id for r in ProjectState(project_dir).jobs()]
+    pbs = PBSScheduler(ClusterSettings(scheduler='pbs'))
+    assert pbs.outcome([*jobs, JobId('77.fakepbs')]) == {}
 
 
 def test_fake_qstat_without_history(fake_pbs):

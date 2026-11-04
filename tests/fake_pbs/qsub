@@ -10,6 +10,7 @@
 #   jobs/<n>[-<i>].exit exit status of the job (of array element <i>)
 #   jobs/<n>.qstat      the job's entry in the output of qstat -f -F json (see
 #                       the fake qstat next to this file)
+#   jobs/<n>-<i>.qstat  the entry of array element <i> (listed by qstat -t)
 #   fail                if it exists, qsub prints its contents to stderr and
 #                       exits with status 1 without submitting
 #   hold                if it exists, jobs are held: they are not run, and
@@ -102,17 +103,26 @@ else
         echo "qsub (fake): single-element array" >&2   # some PBS sites reject them
         exit 2
     fi
-    queued=$last expired=0
+    queued=$last expired=0 exit_status=
     if [ "$state" = F ]; then
         for i in $(seq 1 "$last"); do
             run "$n[$i].fakepbs" "$n-$i" "$i" &
         done
         wait
-        queued=0 expired=$last
+        queued=0 expired=$last exit_status=',"Exit_status":0'
+        for i in $(seq 1 "$last"); do
+            status=$(cat "$FAKE_PBS_DIR/jobs/$n-$i.exit")
+            # like PBS: an array's Exit_status is 1 if any element failed
+            if [ "$status" -ne 0 ]; then
+                exit_status=',"Exit_status":1'
+            fi
+            printf '"%s":{"job_state":"X","Exit_status":%d}' \
+                "$n[$i].fakepbs" "$status" >"$FAKE_PBS_DIR/jobs/$n-$i.qstat"
+        done
     fi
-    printf '"%s":{"job_state":"%s","array":"True","array_state_count":"%s",%s}' \
+    printf '"%s":{"job_state":"%s","array":"True","array_state_count":"%s",%s%s}' \
         "$n[].fakepbs" "$state" \
         "Queued:$queued Running:0 Exiting:0 Expired:$expired " \
-        "\"array_indices_submitted\":\"1-$last\"" >"$entry"
+        "\"array_indices_submitted\":\"1-$last\"" "$exit_status" >"$entry"
     echo "$n[].fakepbs"
 fi

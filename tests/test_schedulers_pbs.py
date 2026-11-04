@@ -16,8 +16,10 @@ from jug_hpc.config import (
 from jug_hpc.runner import CommandError, FakeRunner
 from jug_hpc.schedulers import (
     JobId,
+    JobOutcome,
     JobState,
     JobStatus,
+    Outcome,
     SchedulerError,
     create_scheduler,
     get_scheduler,
@@ -26,6 +28,8 @@ from jug_hpc.schedulers.pbs import (
     JOB_NAME_MAX,
     QSTAT_BATCH,
     PBSScheduler,
+    array_exit_outcome,
+    element_outcome,
     format_memory,
     header_lines,
     job_name,
@@ -33,6 +37,7 @@ from jug_hpc.schedulers.pbs import (
     match_jobs,
     parse_array_state_count,
     parse_job_id,
+    parse_qstat_outcomes,
     parse_qstat_output,
     scheduler_log_dir,
     unexpected_qstat_errors,
@@ -46,6 +51,8 @@ GOLDEN = Path(__file__).parent / 'golden' / 'pbs'
 # Output of qstat -f -F json, in the format of OpenPBS 23 (not yet recorded on
 # a real cluster; replace with real output when the backend is tested on one)
 QSTAT_JSON = (Path(__file__).parent / 'pbs_output' / 'qstat-f-json.json').read_text()
+# ... and of qstat -f -F json -x -t, with array elements and exit statuses
+QSTAT_XT_JSON = (Path(__file__).parent / 'pbs_output' / 'qstat-f-json-xt.json').read_text()
 
 # Set JUG_HPC_UPDATE_GOLDEN=1 to rewrite the golden files (then review the diff)
 UPDATE = bool(os.environ.get('JUG_HPC_UPDATE_GOLDEN'))
@@ -308,6 +315,120 @@ def test_query_timeout():
     runner = FakeRunner().on('qstat', handler=hang)
     with pytest.raises(SchedulerError, match='pbs: could not query jobs.*timed out'):
         PBSScheduler(CLUSTER, runner).query(['1.s'])
+
+
+# --- outcome --------------------------------------------------------------------
+
+SUCCESS = JobOutcome(Outcome.SUCCESS, 0)
+
+QSTAT_OUTCOMES = {
+    '2001.pbs01.example.org': SUCCESS,
+    '2002.pbs01.example.org': JobOutcome(Outcome.FAILED, 3, None, 'exit status 3'),
+    '2003.pbs01.example.org': JobOutcome(
+        Outcome.KILLED_MEMORY, -27, None,
+        'killed by PBS: memory limit exceeded (Exit_status -27)'),
+    '2004.pbs01.example.org': JobOutcome(
+        Outcome.KILLED_TIME, 271, 15,
+        'wall time limit reached (used 01:00:02 of 01:00:00); '
+        'killed by SIGTERM (Exit_status 271)'),
+    '2005.pbs01.example.org': JobOutcome(
+        Outcome.KILLED_SIGNAL, 265, 9,
+        'killed by SIGKILL (Exit_status 265); memory used: 16252928kb of 16gb'),
+    '2007[].pbs01.example.org': JobOutcome(
+        Outcome.KILLED_TIME, -29, None,
+        '2 of 3 workers did not succeed ('
+        'worker 2: killed by PBS: wall time limit exceeded (Exit_status -29); '
+        'worker 3: wall time limit reached (used 02:00:01 of 02:00:00); '
+        'killed by SIGKILL (Exit_status 265))'),
+    '2008[].pbs01.example.org': SUCCESS,
+    '2009.pbs01.example.org': JobOutcome(
+        Outcome.UNKNOWN, detail='no exit status (deleted before it started?)'),
+}
+
+
+def test_parse_qstat_outcomes():
+    assert parse_qstat_outcomes(QSTAT_XT_JSON) == QSTAT_OUTCOMES
+    assert parse_qstat_outcomes('') == {}
+    # without -t, an array job falls back to its own exit status
+    assert parse_qstat_outcomes(QSTAT_JSON) == {
+        '1001.pbs01.example.org': SUCCESS,
+        '1006[].pbs01.example.org': JobOutcome(Outcome.UNKNOWN, None, None, 'no exit status'),
+    }
+
+
+def test_parse_qstat_outcomes_fails():
+    with pytest.raises(SchedulerError, match='could not parse the output of qstat'):
+        parse_qstat_outcomes('{"Jobs": {"1.s": 3}}')
+
+
+@pytest.mark.parametrize('attrs, expected', [
+    ({'Exit_status': 0}, SUCCESS),
+    ({'Exit_status': '0'}, SUCCESS),
+    ({'Exit_status': 1}, JobOutcome(Outcome.FAILED, 1, None, 'exit status 1')),
+    ({'Exit_status': 137}, JobOutcome(Outcome.FAILED, 137, None,
+                                      'exit status 137 (128 + SIGKILL)')),
+    ({'Exit_status': 271}, JobOutcome(Outcome.KILLED_SIGNAL, 271, 15,
+                                      'killed by SIGTERM (Exit_status 271)')),
+    ({'Exit_status': -29}, JobOutcome(Outcome.KILLED_TIME, -29, None,
+                                      'killed by PBS: wall time limit exceeded '
+                                      '(Exit_status -29)')),
+    ({'Exit_status': -26}, JobOutcome(Outcome.KILLED_MEMORY, -26, None,
+                                      'killed by PBS: virtual memory limit exceeded '
+                                      '(Exit_status -26)')),
+    ({'Exit_status': -17}, JobOutcome(Outcome.FAILED, -17, None,
+                                      'a PBS hook rejected the job (Exit_status -17)')),
+    ({'Exit_status': -99}, JobOutcome(Outcome.FAILED, -99, None, 'PBS error (Exit_status -99)')),
+    # a memory kill stays one, even at the wall time limit
+    ({'Exit_status': -27, 'resources_used': {'walltime': '01:00:00'},
+      'Resource_List': {'walltime': '01:00:00'}},
+     JobOutcome(Outcome.KILLED_MEMORY, -27, None,
+                'killed by PBS: memory limit exceeded (Exit_status -27)')),
+    # malformed resources are ignored
+    ({'Exit_status': 1, 'resources_used': 'x', 'Resource_List': {'walltime': 'long'}},
+     JobOutcome(Outcome.FAILED, 1, None, 'exit status 1')),
+    ({}, JobOutcome(Outcome.UNKNOWN, detail='no exit status (deleted before it started?)')),
+    ({'Exit_status': True},
+     JobOutcome(Outcome.UNKNOWN, detail='no exit status (deleted before it started?)')),
+])
+def test_element_outcome(attrs, expected):
+    assert element_outcome(attrs) == expected
+
+
+def test_element_outcome_array_limits():
+    '''An element without its own Resource_List uses the array's'''
+    attrs = {'Exit_status': 271, 'resources_used': {'walltime': '100:00:00'}}
+    assert element_outcome(attrs, {'walltime': '99:00:00'}).outcome is Outcome.KILLED_TIME
+    assert element_outcome(attrs, {'walltime': '101:00:00'}).outcome is Outcome.KILLED_SIGNAL
+    assert element_outcome(attrs).outcome is Outcome.KILLED_SIGNAL
+
+
+@pytest.mark.parametrize('status, outcome', [
+    (0, Outcome.SUCCESS), (1, Outcome.FAILED), (2, Outcome.UNKNOWN), (None, Outcome.UNKNOWN)])
+def test_array_exit_outcome(status, outcome):
+    attrs = {} if status is None else {'Exit_status': status}
+    assert array_exit_outcome(attrs).outcome is outcome
+
+
+def test_outcome():
+    runner = FakeRunner().on('qstat', returncode=153, stdout=QSTAT_XT_JSON,
+                             stderr='qstat: Unknown Job Id 2011.pbs01\n')
+    pbs = PBSScheduler(CLUSTER, runner)
+    jobs = [JobId('2007[].pbs01'), JobId('2002.pbs01'), JobId('2006.pbs01'),
+            JobId('2010[].pbs01'), JobId('2011.pbs01')]
+    # running (2006, 2010[]) and unknown (2011) jobs are left out
+    assert pbs.outcome(jobs) == {
+        '2007[].pbs01': QSTAT_OUTCOMES['2007[].pbs01.example.org'],
+        '2002.pbs01': QSTAT_OUTCOMES['2002.pbs01.example.org'],
+    }
+    assert runner.argvs == [('qstat', '-f', '-F', 'json', '-x', '-t', *jobs)]
+    assert pbs.outcome([]) == {}
+    assert len(runner.calls) == 1
+
+
+def test_outcome_fails():
+    runner = FakeRunner().on('qstat', returncode=2, stderr='qstat: cannot connect\n')
+    with pytest.raises(SchedulerError, match='pbs: could not query jobs: (?s:.*)cannot connect'):
+        PBSScheduler(CLUSTER, runner).outcome(['1.s'])
 
 
 @pytest.mark.parametrize('raw', [

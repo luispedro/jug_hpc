@@ -12,15 +12,18 @@ before making design-level changes. PLAN.md is the source of truth for what come
 Current state: milestones 0–1 are done; milestone 2 is done in code (`schedulers/`,
 `runner.py`, `worker.py`, `script.py`, `selection.py`, `state.py`, `submit.py`,
 `jug-hpc submit --all|--dry-run`; only the manual test on a real PBS cluster is left).
-Milestone 3 is mostly done: task counts per class (`jugstate.task_counts`,
-`classes.counts_by_class`, and `jugstate.subprocess_task_counts` for loading in a
-subprocess), `Scheduler.query()` for PBS and local (a `JobStatus` per job, with
+Milestone 3 is done in code (only the real-PBS checks are left): task counts per class
+(`jugstate.task_counts`, `classes.counts_by_class`, and `jugstate.subprocess_task_counts`
+for loading in a subprocess), `Scheduler.query()` for PBS and local (a `JobStatus` per job, with
 queued/running worker counts), the submission rule and exit condition (pure functions in
 `submitter.py`), and the polling loop (`poll.py`, plain `jug-hpc submit`, with a
 per-project lock), with end-to-end tests on the local backend (chain, three-class chain,
 barrier, workers stopped by `JUG_MAX_SECONDS`, failed task), and `submit --as-job` (the
 submitter as a job, sized by `[submitter]` in `jug_hpc.toml`), and backoff while nothing
 changes (`--max-interval`). Jug's status cache is deliberately not used (PLAN.md).
+Milestone 4 has started: `Scheduler.outcome()` for PBS and local (a `JobOutcome` per
+finished job; arrays combined by `schedulers.base.combine_outcomes`, worst worker wins);
+nothing calls it yet.
 
 ## Commands
 
@@ -158,7 +161,7 @@ paths replaced by `/home/me/rnaseq`.
   They are the slow tests: a worker may wait one Jug wait cycle (12 s) for its last task.
 - `tests/fake_pbs/qsub` is a fake `qsub` (put on `PATH`, state in `$FAKE_PBS_DIR`) that runs
   each job synchronously in a clean, PBS-like environment (or holds it, if a `hold` file
-  exists); `tests/fake_pbs/qstat` serves `qstat -f -F json [-x]` for its jobs.
+  exists); `tests/fake_pbs/qstat` serves `qstat -f -F json [-x] [-t]` for its jobs.
   `tests/test_fake_pbs.py` uses them for end-to-end PBS tests. Their header comments document
   their behaviour. Sample PBS command output for unit tests lives in `tests/pbs_output/`.
   Because of the clean environment, projects there need `setup = "export PATH=<venv

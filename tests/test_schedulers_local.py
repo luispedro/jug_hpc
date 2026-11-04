@@ -28,7 +28,6 @@ from jug_hpc.schedulers import (
 )
 from jug_hpc.schedulers.local import (
     LocalScheduler,
-    combine_outcomes,
     default_jobs_dir,
     element_outcome,
     header_lines,
@@ -148,19 +147,6 @@ def test_parse_job_id_fails(stdout):
 ])
 def test_element_outcome(record, expected):
     assert element_outcome(record) == expected
-
-
-def test_combine_outcomes():
-    ok = JobOutcome(Outcome.SUCCESS, 0)
-    failed = JobOutcome(Outcome.FAILED, 1, None, 'exit status 1')
-    timed_out = JobOutcome(Outcome.KILLED_TIME, None, 15, 'killed: wall time limit reached')
-    assert combine_outcomes({}).outcome is Outcome.UNKNOWN
-    assert combine_outcomes({1: failed}) == failed
-    assert combine_outcomes({1: ok, 2: ok}) == ok
-    assert combine_outcomes({1: ok, 2: failed, 3: timed_out, 4: failed}) == JobOutcome(
-        Outcome.KILLED_TIME, None, 15,
-        '3 of 4 workers did not succeed (worker 2: exit status 1; '
-        'worker 3: killed: wall time limit reached; worker 4: exit status 1)')
 
 
 def test_parse_status_output():
