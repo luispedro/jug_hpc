@@ -78,7 +78,7 @@ def test_command_class(settings):
     _, project = settings
     argv = jug_execute_command(project, project.get_class('align'))
     assert argv == (
-        'jug', 'execute', '--name=align',
+        'jug', 'execute', '--keep-failed', '--name=align',
         f'--nr-wait-cycles={NR_WAIT_CYCLES}', f'--wait-cycle-time={WAIT_CYCLE_TIME}',
         f'--jugdir={project.project_dir}/jugfile.jugdata',
         '--', f'{project.project_dir}/jugfile.py')
@@ -89,12 +89,12 @@ def test_command_default(settings):
     _, project = settings
     argv = jug_execute_command(project, project.default, exclude=True, jug='/opt/jug',
                                nr_wait_cycles=2, wait_cycle_time=3)
-    assert argv[:2] == ('/opt/jug', 'execute')
-    assert argv[2:4] == ('--exclude-name=align', '--exclude-pattern=/^jf\\.merge$/')
+    assert argv[:3] == ('/opt/jug', 'execute', '--keep-failed')
+    assert argv[3:5] == ('--exclude-name=align', '--exclude-pattern=/^jf\\.merge$/')
     assert '--nr-wait-cycles=2' in argv
     assert '--wait-cycle-time=3' in argv
     argv = jug_execute_command(project, project.default, exclude=False)
-    assert argv[2].startswith('--pattern=/^(?!')
+    assert argv[3].startswith('--pattern=/^(?!')
 
 
 @pytest.mark.parametrize('jugdir, expected', [
@@ -228,7 +228,7 @@ def test_run_script_array(tmp_path, settings):
     out = json.loads((spec.logs / 'align-1234-2.log').read_text())
     assert out['env']['JUG_HPC_ARRAY_INDEX'] == '2'
     assert out['env']['OMP_NUM_THREADS'] == '8'
-    assert out['argv'][1] == '--name=align'
+    assert out['argv'][1:3] == ['--keep-failed', '--name=align']
 
 
 @needs_bash

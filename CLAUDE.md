@@ -12,12 +12,12 @@ before making design-level changes. PLAN.md is the source of truth for what come
 Current state: milestones 0–1 are done; milestone 2 is done in code (`schedulers/`,
 `runner.py`, `worker.py`, `script.py`, `selection.py`, `state.py`, `submit.py`,
 `jug-hpc submit --all|--dry-run`; only the manual test on a real PBS cluster is left).
-Milestone 3 has started: task counts per class (`jugstate.task_counts`,
+Milestone 3 is mostly done: task counts per class (`jugstate.task_counts`,
 `classes.counts_by_class`, and `jugstate.subprocess_task_counts` for loading in a
-subprocess) and `Scheduler.query()` for PBS and local (a `JobStatus` per job, with
-queued/running worker counts) exist, as do the submission rule and exit condition
-(pure functions in `submitter.py`); the polling loop and `jug-hpc submit` without
-`--all`/`--dry-run` do not.
+subprocess), `Scheduler.query()` for PBS and local (a `JobStatus` per job, with
+queued/running worker counts), the submission rule and exit condition (pure functions in
+`submitter.py`), and the polling loop (`poll.py`, plain `jug-hpc submit`, with a
+per-project lock). Not yet: `--as-job`, backoff, Jug's status cache, more end-to-end tests.
 
 ## Commands
 
@@ -112,8 +112,14 @@ required because TOML is read with `tomllib`; Jug is the only runtime dependency
   `--dry-run` prints exactly what `--all` runs.
 - **`submitter.py`**: the polling submitter's decisions, pure (no I/O): which jobs to
   query, active workers per class, `workers_to_submit` (`min(ready, workers) - active`),
-  and `progress` (keep polling / finished / blocked by failed tasks). The loop is not
-  written yet.
+  and `progress` (keep polling / finished / blocked by failed tasks).
+- **`poll.py`**: the loop around them. `Submitter.poll()` does one poll (counts in a
+  subprocess, `query`, submissions via `submit.prepare_class`/`write_script`/
+  `submit_worker`); the only state kept between polls is the set of settled job IDs.
+  `run()` repeats it; first-poll errors are fatal, later `SchedulerError`/`JugfileError`
+  are retried (`MAX_FAILED_POLLS`). `cli._poll` holds `ProjectState.submitter_lock()`.
+- Workers run `jug execute --keep-failed` (`script.jug_execute_command`), so failed tasks
+  stay failed and the submitter can stop instead of resubmitting them forever.
 - **`cli.py`**: argparse subcommands dispatched via the `COMMANDS` dict; command
   implementations import lazily. Listings go to stdout, `jug-hpc: error|warning|note: ...`
   to stderr. `-C DIR` sets where to start searching upward for `jug_hpc.toml`.

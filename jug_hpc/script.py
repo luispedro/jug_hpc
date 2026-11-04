@@ -27,6 +27,11 @@ Choices made here:
   can override them; ``JUG_MAX_*`` are set *after* them, so that nothing
   (neither the user's environment nor a snippet) changes the time limit.
   Jug adds up ``JUG_MAX_HOURS``, ``JUG_MAX_MINUTES`` and ``JUG_MAX_SECONDS``.
+- Workers run ``jug execute --keep-failed``: a task that raises stays locked
+  as failed (until ``jug cleanup --failed-only``). Without it, Jug releases
+  the lock and the task is ready again, so every new worker would run it again
+  and the polling submitter would keep submitting workers for it; with it, the
+  submitter sees failed tasks and stops when nothing else can run.
 
 Every value is quoted with :func:`shlex.quote`, except the shell expressions
 supplied by the backend (job ID, array index), which are placed inside double
@@ -123,6 +128,7 @@ def jug_execute_command(project, rc, *, jug='jug', exclude=None, task_names=None
     jugdir = project.jugdir if project.jugdir is not None else default_jugdir(project.jugfile)
     return (
         jug, 'execute',
+        '--keep-failed',
         *selector_args(rc, project.all_classes(), exclude=exclude,
                        task_names=task_names, path=project.path),
         f'--nr-wait-cycles={nr_wait_cycles}',

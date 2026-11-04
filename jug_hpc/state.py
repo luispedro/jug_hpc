@@ -6,6 +6,7 @@ jug_hpc keeps what it submitted next to ``jug_hpc.toml``::
       .gitignore      '*', so the directory is never committed
       jobs.json       every job submitted for the project
       jobs.lock       held while jobs.json is updated
+      submitter.lock  held by the polling submitter (``jug-hpc submit``) while it runs
       scripts/        every script written, <class>-<n>.sh
 
 Scripts are kept (including those written by ``submit --dry-run``, which are
@@ -24,11 +25,16 @@ in submission order. Script paths are relative to the project directory, so
 the project can be moved. The file is replaced atomically, so readers (e.g.
 ``jug-hpc status`` while the submitter runs) never see a partial file, and
 writers take ``jobs.lock`` so that concurrent additions are not lost.
+
+Only one polling submitter may run for a project, or two would each submit
+the workers the tasks need: it holds ``submitter.lock``
+(:meth:`ProjectState.submitter_lock`), which says where it runs.
 '''
 import contextlib
 import fcntl
 import json
 import os
+import socket
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -51,6 +57,7 @@ FORMAT_VERSION = 1
 
 _JOBS_FILE = 'jobs.json'
 _LOCK_FILE = 'jobs.lock'
+_SUBMITTER_LOCK_FILE = 'submitter.lock'
 _SCRIPTS_DIR = 'scripts'
 
 
@@ -251,6 +258,47 @@ class ProjectState:
             jobs.append(record)
             self._write(jobs)
         return record
+
+    # --- the submitter's lock ---------------------------------------------------
+
+    @contextlib.contextmanager
+    def submitter_lock(self):
+        '''Hold ``.jug_hpc/submitter.lock`` while the polling submitter runs
+
+        The lock is an ``flock``, so it is released when the process ends,
+        however it ends. While held, the file says which process holds it
+        (``pid@host``).
+
+        Raises
+        ------
+        StateError
+            If another process holds the lock (the message says which), or
+            the lock file cannot be opened
+        '''
+        self._ensure()
+        lock = self.path / _SUBMITTER_LOCK_FILE
+        try:
+            fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o644)
+        except OSError as e:
+            raise StateError(f'{lock}: cannot open lock file: {e}') from e
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                holder = os.pread(fd, 256, 0).decode(errors='replace').strip()
+                holder = f' (process {holder})' if holder else ''
+                raise StateError(f'{lock}: another jug-hpc submit is running for this '
+                                 f'project{holder}') from None
+            except OSError as e:
+                raise StateError(f'{lock}: cannot lock: {e}') from e
+            os.ftruncate(fd, 0)
+            os.pwrite(fd, f'{os.getpid()}@{socket.gethostname()}\n'.encode(), 0)
+            try:
+                yield
+            finally:
+                os.ftruncate(fd, 0)
+        finally:
+            os.close(fd)
 
     @contextlib.contextmanager
     def _locked(self):

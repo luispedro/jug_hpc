@@ -78,7 +78,7 @@ def test_prepare(loaded):
     align, default = prep.workers
     assert '#PBS -J 1-2' in align.script
     assert 'ncpus=4' in align.script
-    assert 'exec jug execute --name=align_sample ' in align.script
+    assert 'exec jug execute --keep-failed --name=align_sample ' in align.script
     assert '#PBS -J 1-4' in default.script
     assert 'align_sample' in default.script      # excluded from the default class
 
@@ -233,13 +233,6 @@ def test_cli_dry_run(tmp_path, monkeypatch, capsys):
         'jug-hpc: note: [default]: 4 tasks, so 4 workers instead of 10',
     ]
     assert not (project_dir / '.jug_hpc' / 'jobs.json').exists()
-
-
-def test_cli_needs_a_mode(tmp_path, capsys):
-    with pytest.raises(SystemExit) as e:
-        main(['-C', str(tmp_path), 'submit'])
-    assert e.value.code == 2
-    assert 'one of the arguments --all --dry-run is required' in capsys.readouterr().err
 
 
 def test_cli_errors(tmp_path, monkeypatch, capsys):

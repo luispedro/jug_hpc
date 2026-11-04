@@ -39,30 +39,56 @@ def build_parser():
             'error (exit status 1); classes matching no task are a warning.'))
     submit = commands.add_parser(
         'submit',
-        help='write the worker scripts and submit them',
+        help='submit workers as their tasks become ready',
         description=(
-            'Write a worker script for every resource class with tasks (in '
-            '.jug_hpc/scripts/) and submit it. With --all, every class is '
-            'submitted at once, with at most one worker per task: this suits '
-            'task graphs where the classes do not wait for each other. With '
-            '--dry-run, the scripts and the commands that would submit them '
-            'are printed instead.'))
-    mode = submit.add_mutually_exclusive_group(required=True)
+            'Submit workers for every resource class as its tasks become '
+            'ready, and keep polling (counting the tasks and asking the '
+            'scheduler about the workers) until every task is finished, or '
+            'no task can run because some failed. Each class gets at most '
+            'min(ready tasks, workers) queued or running workers. Only one '
+            'submitter may run per project. Worker scripts are kept in '
+            '.jug_hpc/scripts/. With --all, every class is submitted at '
+            'once instead, with at most one worker per task, and jug-hpc '
+            'exits: this suits task graphs where the classes do not wait for '
+            'each other. With --dry-run, the scripts and the commands that '
+            'would submit them are printed instead.'))
+    mode = submit.add_mutually_exclusive_group()
     mode.add_argument('--all', action='store_true',
-                      help='submit every class now')
+                      help='submit every class now, and exit')
     mode.add_argument('--dry-run', action='store_true',
                       help='write and print the scripts and submit commands, '
                            'without submitting')
     submit.add_argument(
+        '--interval', type=_positive_seconds, metavar='SECONDS', default=None,
+        help='seconds between polls (default: 60)')
+    submit.add_argument(
         'classes', nargs='*', metavar='CLASS',
-        help="only these classes ('default' for the default class); a class "
-             'named here is submitted even if it has no tasks')
+        help="with --all or --dry-run: only these classes ('default' for the "
+             'default class); a class named here is submitted even if it has '
+             'no tasks')
     return parser
+
+
+def _positive_seconds(text):
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f'not a number: {text!r}') from None
+    if not value > 0:
+        raise argparse.ArgumentTypeError(f'must be positive: {text!r}')
+    return value
 
 
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == 'submit':
+        if args.all or args.dry_run:
+            if args.interval is not None:
+                parser.error('--interval: only without --all and --dry-run')
+        elif args.classes:
+            parser.error('CLASS: only with --all or --dry-run (the submitter '
+                         'polls every class)')
     if args.command is None:
         parser.print_help(sys.stderr)
         return 2
@@ -175,6 +201,13 @@ def cmd_check(args, start):
 
 
 def cmd_submit(args, start):
+    '''``jug-hpc submit``: the polling submitter, or ``--all|--dry-run``'''
+    if not (args.all or args.dry_run):
+        return _poll(args, start)
+    return _submit_static(args, start)
+
+
+def _submit_static(args, start):
     '''``jug-hpc submit --all|--dry-run``: scripts and job IDs go to stdout'''
     from .config import (
         PROJECT_FILE,
@@ -234,6 +267,99 @@ def cmd_submit(args, start):
               f'({workers} worker{"s" if workers != 1 else ""}, {record.script})',
               flush=True)
     return 0
+
+
+def _poll(args, start):
+    '''``jug-hpc submit``: one line per event on stdout, with the time'''
+    from .config import (
+        PROJECT_FILE,
+        ConfigError,
+        find_project_dir,
+        load_cluster_settings,
+        load_project_settings,
+    )
+    from .jugstate import JugfileError
+    from .poll import POLL_INTERVAL, Submitter, run
+    from .schedulers.base import SchedulerError, create_scheduler
+    from .state import ProjectState, StateError
+    from .submitter import Progress
+
+    project_dir = find_project_dir(start)
+    if project_dir is None:
+        _error(f'no {PROJECT_FILE} found in {start.absolute()} or any parent '
+               'directory')
+        return 1
+    interval = args.interval if args.interval is not None else POLL_INTERVAL
+    last = [None]
+
+    def on_poll(result):
+        for record in result.submitted:
+            workers = record.workers
+            _log(f'{record.class_name}: submitted job {record.job_id} '
+                 f'({workers} worker{"s" if workers != 1 else ""}, {record.script})')
+        for e in result.errors:
+            _error(e)
+        summary = _poll_summary(result)
+        if summary != last[0]:
+            _log(summary)
+            last[0] = summary
+
+    def on_failure(e):
+        _message('warning', f'{e} (trying again in {interval:g} s)')
+
+    try:
+        cluster = load_cluster_settings(project_dir)
+        project = load_project_settings(project_dir)
+        scheduler = create_scheduler(cluster)
+        project_state = ProjectState(project_dir)
+        submitter = Submitter(cluster, project, scheduler, project_state)
+        for warning in submitter.warnings:
+            _message('warning', warning)
+        with project_state.submitter_lock():
+            result = run(submitter, interval=interval, on_poll=on_poll,
+                         on_failure=on_failure)
+    except (ConfigError, SchedulerError, StateError) as e:
+        _error(e)
+        return 1
+    except JugfileError as e:
+        if e.details:
+            print(e.details.rstrip('\n'), file=sys.stderr)
+        _error(e)
+        return 1
+    except KeyboardInterrupt:
+        _message('note', 'interrupted: the workers already submitted keep running')
+        return 130
+    if result.report.progress is Progress.FINISHED:
+        _log('every task is finished')
+        return 0
+    failed = ', '.join(f'{_table_label(n)} {c}' for n, c in result.report.failed.items())
+    message = f'no task can run: failed tasks: {failed}'
+    if result.report.waiting:
+        waiting = ', '.join(f'{_table_label(n)} {c}' for n, c in result.report.waiting.items())
+        message += f'; tasks waiting for them: {waiting}'
+    _error(message)
+    _message('note', 'the worker logs say why the tasks failed; once fixed, '
+                     "'jug cleanup --failed-only' lets them run again")
+    return 1
+
+
+def _table_label(name):
+    return '[default]' if name == 'default' else f'[class.{name}]'
+
+
+def _poll_summary(result):
+    '''One line: the tasks of each state, and the active workers'''
+    from .jugstate import STATES, TaskCounts
+    total = sum(result.by_class.values(), TaskCounts())
+    parts = ', '.join(f'{getattr(total, s)} {s}' for s in STATES)
+    workers = sum(result.active.values()) + sum(r.workers for r in result.submitted)
+    barrier = ' (more after a barrier)' if result.hit_barrier else ''
+    return f'tasks: {parts}{barrier}; workers queued or running: {workers}'
+
+
+def _log(message):
+    from datetime import datetime
+    print(f'[{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] {message}', flush=True)
 
 
 COMMANDS = {

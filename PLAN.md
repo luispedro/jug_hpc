@@ -383,6 +383,20 @@ cluster and runs a one-class jugfile to completion. → **Release 0.1.**
 5. `jug-hpc submit` runs the loop in the foreground; `--as-job` submits the
    loop itself as a small, long job (1 CPU, little memory). Only one
    submitter per project is allowed (a lock in `.jug_hpc/`).
+   - Done (except `--as-job`): `poll.py` has `Submitter.poll()` (counts in a
+     subprocess, queries the jobs not yet settled, submits what
+     `workers_to_submit` asks for, only while `RUNNING`) and `run()` (polls
+     every `--interval` seconds, default 60, until `FINISHED` or `BLOCKED`).
+     Errors at the first poll are fatal; later, a poll that fails with a
+     `SchedulerError` or `JugfileError` (or a failed submission) is retried,
+     up to 5 times in a row. The lock is an `flock` on
+     `.jug_hpc/submitter.lock` (holding `pid@host`). Exit status 0 when
+     finished, 1 when blocked by failed tasks.
+   - **Decided: workers run `jug execute --keep-failed`.** Without it, Jug
+     releases a failed task's lock and the task is ready again, so the
+     submitter would submit workers for it forever and never see a failed
+     task. With it, failed tasks stay failed until `jug cleanup
+     --failed-only`.
 6. Poll interval: configurable, default about one minute, with backoff when
    nothing changes. Use Jug's status cache so a poll stays cheap for large
    graphs; measure on a jugfile with 100k tasks.

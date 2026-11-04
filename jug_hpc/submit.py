@@ -48,7 +48,9 @@ __all__ = [
     'check_jugdir',
     'format_dry_run',
     'prepare',
+    'prepare_class',
     'submit_worker',
+    'write_script',
     'write_scripts',
 ]
 
@@ -186,14 +188,80 @@ def prepare(cluster, project, state, scheduler, *, classes=None, jug='jug'):
                     f'{_label(name)}: {_n(tasks, "task")}, so {_n(tasks, "worker")} '
                     f'instead of {workers}')
                 workers = tasks
-        command = jug_execute_command(project, rc, jug=jug, task_names=state.task_names)
-        spec = make_worker_spec(cluster, project, rc, command, workers=max(workers, 1))
-        result.workers.append(PreparedWorker(name, tasks, spec, scheduler.render_script(spec)))
+        result.workers.append(prepare_class(cluster, project, rc, scheduler,
+                                            workers=max(workers, 1), tasks=tasks,
+                                            task_names=state.task_names, jug=jug))
     if state.hit_barrier:
         result.notes.append(
             'loading stopped at a barrier(): tasks defined after it are not known '
             'yet, so every class gets its configured number of workers')
     return result
+
+
+def prepare_class(cluster, project, rc, scheduler, *, workers, tasks, task_names,
+                  jug='jug'):
+    '''Build the workers of one class
+
+    Parameters
+    ----------
+    cluster : ClusterSettings
+    project : ProjectSettings
+    rc : ResourceClass
+    scheduler : Scheduler
+    workers : int
+        Number of workers (at least 1)
+    tasks : int
+        Number of tasks of the class, for :attr:`PreparedWorker.tasks`
+    task_names : collection of str
+        The names of the jugfile's tasks (the default class may need them to
+        select its tasks, see :func:`jug_hpc.selection.selector_args`)
+    jug : str, optional
+        The ``jug`` executable in the worker script
+
+    Returns
+    -------
+    prepared : PreparedWorker
+
+    Raises
+    ------
+    ConfigError
+        If the default class's tasks cannot be selected
+    SchedulerError
+        If the script cannot be rendered
+    '''
+    command = jug_execute_command(project, rc, jug=jug, task_names=task_names)
+    spec = make_worker_spec(cluster, project, rc, command, workers=workers)
+    return PreparedWorker(rc.name, tasks, spec, scheduler.render_script(spec))
+
+
+def write_script(prepared, scheduler, project_state):
+    '''Save the script of one prepared worker and create its log directory
+
+    Parameters
+    ----------
+    prepared : PreparedWorker
+    scheduler : Scheduler
+    project_state : ProjectState
+
+    Returns
+    -------
+    written : WrittenWorker
+
+    Raises
+    ------
+    StateError
+        If the script or the log directory cannot be written
+    '''
+    path = project_state.write_script(prepared.class_name, prepared.script)
+    logs = prepared.spec.scheduler_logs
+    try:
+        logs.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise StateError(f'{logs}: cannot create the log directory: {e}') from e
+    script = path.relative_to(project_state.project_dir) \
+        if path.is_relative_to(project_state.project_dir) else path
+    command = tuple(scheduler.submit_command(script, prepared.spec))
+    return WrittenWorker(prepared, path, script, command)
 
 
 def write_scripts(preparation, scheduler, project_state):
@@ -214,19 +282,7 @@ def write_scripts(preparation, scheduler, project_state):
     StateError
         If a script or a log directory cannot be written
     '''
-    written = []
-    for w in preparation.workers:
-        path = project_state.write_script(w.class_name, w.script)
-        logs = w.spec.scheduler_logs
-        try:
-            logs.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            raise StateError(f'{logs}: cannot create the log directory: {e}') from e
-        script = path.relative_to(project_state.project_dir) \
-            if path.is_relative_to(project_state.project_dir) else path
-        command = tuple(scheduler.submit_command(script, w.spec))
-        written.append(WrittenWorker(w, path, script, command))
-    return written
+    return [write_script(w, scheduler, project_state) for w in preparation.workers]
 
 
 def submit_worker(written, scheduler, project_state):
