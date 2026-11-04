@@ -17,9 +17,10 @@ Milestone 3 is mostly done: task counts per class (`jugstate.task_counts`,
 subprocess), `Scheduler.query()` for PBS and local (a `JobStatus` per job, with
 queued/running worker counts), the submission rule and exit condition (pure functions in
 `submitter.py`), and the polling loop (`poll.py`, plain `jug-hpc submit`, with a
-per-project lock), with end-to-end tests on the local backend (chain, barrier, workers
-stopped by `JUG_MAX_SECONDS`, failed task), and `submit --as-job` (the submitter as a job,
-sized by `[submitter]` in `jug_hpc.toml`). Not yet: backoff, Jug's status cache.
+per-project lock), with end-to-end tests on the local backend (chain, three-class chain,
+barrier, workers stopped by `JUG_MAX_SECONDS`, failed task), and `submit --as-job` (the
+submitter as a job, sized by `[submitter]` in `jug_hpc.toml`). Not yet: backoff, Jug's
+status cache.
 
 ## Commands
 

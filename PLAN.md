@@ -183,8 +183,9 @@ cluster and runs a one-class jugfile to completion. → **Release 0.1.**
 
 ### Milestone 3: the polling submitter
 
-Steps 1–5 are done (task counts per class, `query()`, the submission rule,
-the exit condition, `jug-hpc submit` and `--as-job`), and most of step 7.
+Steps 1–5 and 7 are done (task counts per class, `query()`, the submission
+rule, the exit condition, `jug-hpc submit` and `--as-job`, end-to-end tests on
+the local backend).
 Decisions taken there that later steps depend on:
 
 - **The submitter loads the jugfile in a subprocess** on each poll
@@ -214,10 +215,7 @@ Remaining:
    backoff when nothing changes. Use Jug's status cache so a poll stays cheap
    for large graphs; measure on a jugfile with 100k tasks (each poll runs a
    subprocess that loads the jugfile).
-7. End-to-end tests with the local backend: still missing a three-class
-   chain (the A→B→A chain, a `barrier()`, workers stopped by
-   `JUG_MAX_SECONDS` and a failed task are covered in `tests/test_poll.py`).
-8. Open questions:
+7. Open questions:
    - A submitter job that reaches its wall time is killed (workers keep
      running; the user submits again). It could resubmit itself before then;
      it would have to release the lock first, and the new job wait briefly
@@ -225,7 +223,7 @@ Remaining:
    - Should `submit --all` refuse to run while the submitter lock is held?
      (It does not take the lock now.)
    - Show the jugfile's own output (`PollResult.output`) on the first poll?
-9. To check on a real PBS cluster (with milestone 2's test):
+8. To check on a real PBS cluster (with milestone 2's test):
    - record real `qstat -f -F json -x` output (plain job and array; queued,
      running and finished; an unknown ID) into `tests/pbs_output/`, replacing
      `qstat-f-json.json`, which is modelled on OpenPBS 23, not recorded. Check
@@ -240,6 +238,9 @@ Remaining:
 completion on the local backend and on a real PBS cluster from a single
 `jug-hpc submit`, and no worker waits more than a few minutes for
 dependencies. → **Release 0.2.**
+Local backend: done (`tests/test_poll.py::test_cli_submit_runs_three_classes`,
+a default → align → merge → default chain whose tasks record the class and
+CPUs of the worker that ran them).
 
 ### Milestone 4: status, cancel and failure handling
 

@@ -615,6 +615,90 @@ def test_cli_submit_runs_barrier(tmp_path, monkeypatch, capsys):
     assert state.store.load(state.hashes[i].decode()) == 6
 
 
+# Each task returns the class and CPU count of the worker that ran it
+THREE_CLASSES = '''\
+import os
+from jug import TaskGenerator
+
+def where():
+    return (os.environ['JUG_HPC_CLASS'], os.environ['JUG_HPC_CPUS'])
+
+@TaskGenerator
+def prepare(i):
+    return [where()]
+
+@TaskGenerator
+def align(x):
+    return x + [where()]
+
+@TaskGenerator
+def merge(xs):
+    return [x for x in xs] + [[where()]]
+
+@TaskGenerator
+def report(xs):
+    return xs + [[where()]]
+
+result = report(merge([align(prepare(i)) for i in range(3)]))
+'''
+
+THREE_CLASSES_PROJECT = '''\
+[default]
+memory = "1G"
+time = "1h"
+workers = 2
+
+[class.align]
+match = "align"
+cpus = 2
+workers = 3
+
+[class.merge]
+match = "merge"
+cpus = 3
+workers = 1
+'''
+
+
+@needs_bash
+def test_cli_submit_runs_three_classes(tmp_path, monkeypatch, capsys):
+    '''A default -> align -> merge -> default chain: each task runs in its class's workers'''
+    project_dir, sched = local_project(tmp_path, monkeypatch, THREE_CLASSES,
+                                       THREE_CLASSES_PROJECT)
+    status = main(['-C', str(project_dir), 'submit', '--interval=0.2'])
+    out, err = capsys.readouterr()
+    records = ProjectState(project_dir).jobs()
+    wait_for_jobs(sched, [r.job_id for r in records])
+    logs = '\n'.join(p.read_text() for p in (project_dir / 'logs').glob('*.log'))
+    assert status == 0, err + out + logs
+    assert err == ''
+    lines = [line.split('] ', 1)[1] for line in out.splitlines()]
+    assert lines[:2] == [
+        'default: submitted job 1 (2 workers, .jug_hpc/scripts/default-1.sh)',
+        ('tasks: 5 waiting, 3 ready, 0 running, 0 failed, 0 finished; '
+         'workers queued or running: 2'),
+    ]
+    assert lines[-1] == 'every task is finished'
+    assert lines[-2].startswith('tasks: 0 waiting, 0 ready, 0 running, 0 failed, 8 finished')
+    # each class is submitted once its tasks are ready, in the order of the chain
+    first_seen = list(dict.fromkeys(r.class_name for r in records))
+    assert first_seen == ['default', 'align', 'merge'], out
+    by_class = {}
+    for r in records:
+        by_class.setdefault(r.class_name, []).append(r.workers)
+    assert all(w <= 3 for w in by_class['align'])
+    assert by_class['merge'] == [1]
+    for outcome in sched.outcome([r.job_id for r in records]).values():
+        assert outcome.outcome is Outcome.SUCCESS, logs
+    state = load_project(load_project_settings(project_dir))
+    [i] = [i for i, t in enumerate(state.tasks) if t.name == 'jugfile.report']
+    *aligned, [merged], [reported] = state.store.load(state.hashes[i].decode())
+    prepare_align = [('default', '1'), ('align', '2')]
+    assert [[tuple(w) for w in ws] for ws in aligned] == [prepare_align] * 3
+    assert tuple(merged) == ('merge', '3')
+    assert tuple(reported) == ('default', '1')
+
+
 SLOW_TASKS = '''\
 import time
 from jug import TaskGenerator
