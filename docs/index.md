@@ -2,8 +2,9 @@
 
 ```{warning}
 jug_hpc is in early development and has not had a release yet. The commands
-described here work, but they have only been tested against a simulated PBS
-cluster. `jug-hpc status` and `jug-hpc cancel` are not written yet.
+described here work, and the PBS backend has been tested on one real PBS
+Professional cluster as well as a simulated one. `jug-hpc status` and
+`jug-hpc cancel` are not written yet, and SLURM is not supported yet.
 ```
 
 ## What is jug_hpc?
@@ -106,4 +107,5 @@ configuration
 submitting
 schedulers
 faq
+llms
 ```

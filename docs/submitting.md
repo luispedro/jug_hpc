@@ -164,8 +164,9 @@ changes to the jugfile.
 
 The submitter keeps almost no state of its own. At each poll it reads the task
 states from the jugdir and the submitted jobs from `.jug_hpc/jobs.json`. You can
-stop it at any time (`Ctrl-C`) and start it again later. Workers that are
-already submitted keep running, and the new submitter counts them.
+stop it at any time (`Ctrl-C`, exit status 130) and start it again later.
+Workers that are already submitted keep running, and the new submitter counts
+them.
 
 Only one submitter may run for a project, since two would each submit the
 workers the tasks need. A second `jug-hpc submit` fails with an error naming

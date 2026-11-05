@@ -56,7 +56,9 @@ runtime dependency.
 User documentation lives in `docs/` (Sphinx + MyST Markdown, like `../jug/docs`; Read the
 Docs builds it with `.readthedocs.yaml`, failing on warnings). When behaviour that users see
 changes (keys, defaults, CLI options, script contents, messages quoted there, limitations),
-update the docs in the same commit. Example output in the docs comes from real runs, with
+update the docs in the same commit, including `docs/llms.md` (the dense page for LLMs,
+also served as `/llms.txt` by a hook in `docs/conf.py`; plain Markdown, no MyST roles, so it
+reads well raw). Example output in the docs comes from real runs, with
 paths replaced by `/home/me/rnaseq`.
 
 ## Design principles that constrain code
