@@ -138,7 +138,8 @@ too, as a guess. Jobs you delete yourself (`qdel`) are not reported. An array
 job is reported once, by its worst worker (killed for memory before killed for
 wall time); the warning lists how each of its workers that did not succeed
 ended. The values in the suggestion are the class's current ones. The local
-backend enforces only the wall time.
+backend enforces only the wall time. `jug-hpc status` reports the killed jobs
+too (see [below](#following-a-run-jug-hpc-status)).
 
 ### How often it polls
 
@@ -206,6 +207,57 @@ The compute nodes must be allowed to submit jobs (`qsub`) and query them
 (`qstat`). Most clusters allow this, but not all. If the submitter job reaches
 its wall time, it is killed, but the workers keep running. Run
 `jug-hpc submit --as-job` again to continue.
+
+## Following a run: `jug-hpc status`
+
+`jug-hpc status` shows, for each class, its tasks in each state (counted as
+the submitter counts them, loading the jugfile) and its workers queued and
+running (asking the scheduler about the jobs in `.jug_hpc/jobs.json`), and
+whether a submitter is running. It changes nothing, and you can run it at any
+time, also while the submitter runs. Here, during the run of the example
+above:
+
+```
+$ jug-hpc status
+                                 tasks                        workers
+class          waiting  ready  running  failed  finished  queued  running
+[class.align]        0      1       10       0         9       0       10
+[class.merge]        1      0        0       0         0       0        0
+[default]           11      1        4       0         4       0        4
+total               12      2       14       0        13       0       14
+
+Submitter: running (process 723229@login1)
+```
+
+The submitter is the process that holds the project's lock (on a login node,
+or in a job), or a submitter job (`--as-job`) that is queued or running.
+
+The jobs that the scheduler killed are warnings, one per class and way of
+being killed, with the same suggestion as in the submitter's log. They cover
+every job in `jobs.json` that the scheduler still knows (on PBS, this needs
+job history), also those from earlier runs. Here, after the run stopped:
+
+```
+$ jug-hpc status
+                                 tasks                        workers
+class          waiting  ready  running  failed  finished  queued  running
+[class.align]        0      1        0       0        19       0        0
+[class.merge]        1      0        0       0         0       0        0
+[default]            1      0        0       0        19       0        4
+total                2      1        0       0        38       0        4
+
+Submitter: not running
+jug-hpc: warning: [class.align]: 4 jobs killed for wall time (the last: job 5: killed: wall time limit reached); raise time (now 00:00:05), or lower time_fraction (now 0.8: a task started after 00:00:04 has 00:00:01 left)
+```
+
+The four `default` workers still running have nothing to do: they wait for
+the `count` task that needs the `align` task that keeps being killed, and give
+up after about 3 minutes.
+
+Notes say when every task is finished, when no task can run because some
+failed, and when tasks are ready but no worker is queued or running and no
+submitter is running (run `jug-hpc submit`). The exit status is 0 unless the
+settings, the jugfile, `jobs.json` or the scheduler can't be read.
 
 ## Static submission: `--all` and `--dry-run`
 
@@ -309,9 +361,8 @@ cancel by hand.
 
 jug_hpc is in early development. In particular:
 
-- `jug-hpc status` (task counts grouped by class) and `jug-hpc cancel` are not
-  written yet. Use `jug status`, your scheduler's own commands and
-  `.jug_hpc/jobs.json`.
+- `jug-hpc cancel` is not written yet. Use your scheduler's own commands
+  (`qdel`) with the job IDs in `.jug_hpc/jobs.json`.
 - Locks left behind are not detected yet. A worker killed with `SIGKILL`
   (for example for exceeding its memory) leaves its task's lock behind (one
   killed with `SIGTERM`, as for wall time, usually releases it). With a plain

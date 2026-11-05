@@ -26,7 +26,8 @@ finished job; arrays combined by `schedulers.base.combine_outcomes`, worst worke
 used by the submitter to stop submitting workers for a class whose jobs keep failing
 (step 8: `submitter.update_failing`/`stopped_classes`, `Progress.STALLED`), and
 to report jobs killed by the scheduler in the submitter's log, with what to change
-(step 4, `kills.py`; not yet in `status`, which doesn't exist yet).
+(step 4, `kills.py`), and `jug-hpc status` (step 1, `status.py`: tasks and workers per
+class, the submitter, and the kills of every recorded job).
 
 ## Commands
 
@@ -154,6 +155,11 @@ paths replaced by `/home/me/rnaseq`.
   and `suggestion(outcome, rc)` (raise `memory`/`time`, lower `time_fraction`; SIGKILL
   gets the memory one as a guess). `cli._poll` warns for each killed job in
   `PollResult.ended` and sums them up per class when the run is over.
+- **`status.py`**: `jug-hpc status`, pure like `check.py`: `worker_counts` (queued/running
+  per class, `SUBMIT_GRACE` as in `active_workers`) and `status(...)` → `StatusReport`
+  (table text, kill warnings per class and kind, notes). `cli.cmd_status` reads everything
+  (all jobs of the backend in `jobs.json`, `query` then `outcome`, task counts in a
+  subprocess, `ProjectState.submitter_lock_holder()`) and holds no lock.
 - Workers run `jug execute --keep-failed` (`script.jug_execute_command`), so failed tasks
   stay failed and the submitter can stop instead of resubmitting them forever.
 - **`cli.py`**: argparse subcommands dispatched via the `COMMANDS` dict; command

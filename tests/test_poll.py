@@ -936,6 +936,65 @@ def test_cli_submit_reports_killed_jobs(tmp_path, monkeypatch, capsys):
          "say why the jobs failed; once fixed, run 'jug-hpc submit' again"),
     ]
 
+    # status reports them too, from jobs.json
+    status = main(['-C', str(project_dir), 'status'])
+    out, err = capsys.readouterr()
+    assert status == 0, err
+    assert out.splitlines()[2:] == [
+        '[default]        0      1        0       0         0       0        0',
+        'total            0      1        0       0         0       0        0',
+        '',
+        'Submitter: not running',
+    ]
+    assert err.splitlines() == [
+        ('jug-hpc: warning: [default]: 3 jobs killed for wall time (the last: job 3: '
+         f'{killed.removeprefix("ended: ").replace("; ", "); ", 1)}'),
+        ("jug-hpc: note: tasks are ready, but no worker is queued or running and no "
+         "submitter is running: run 'jug-hpc submit'"),
+    ]
+
+
+def test_cli_status(tmp_path, monkeypatch, capsys):
+    '''status on a project where nothing was submitted, and with another backend's job'''
+    project_dir, _sched = local_project(tmp_path, monkeypatch, CHAIN)
+    status = main(['-C', str(project_dir), 'status'])
+    out, err = capsys.readouterr()
+    assert status == 0, err
+    assert out == (
+        '                                  tasks                        workers\n'
+        'class           waiting  ready  running  failed  finished  queued  running\n'
+        '[class.middle]        3      0        0       0         0       0        0\n'
+        '[default]             1      3        0       0         0       0        0\n'
+        'total                 4      3        0       0         0       0        0\n'
+        '\n'
+        'Submitter: not running\n')
+    assert err == ("jug-hpc: note: tasks are ready, but no worker is queued or running and "
+                   "no submitter is running: run 'jug-hpc submit'\n")
+    # nothing was created
+    assert not (project_dir / '.jug_hpc').exists()
+
+    # a job recorded with another backend is not asked about
+    ProjectState(project_dir).add_job('1.pbs01', 'default', 'pbs', 2, 'x.sh')
+    status = main(['-C', str(project_dir), 'status'])
+    out, err = capsys.readouterr()
+    assert status == 0, err
+    assert err.splitlines()[-1] == (
+        "jug-hpc: note: 1 job submitted with the 'pbs' backend not asked about (the "
+        "backend in use is 'local')")
+
+
+def test_cli_status_errors(tmp_path, monkeypatch, capsys):
+    status = main(['-C', str(tmp_path), 'status'])
+    _, err = capsys.readouterr()
+    assert status == 1
+    assert err.startswith('jug-hpc: error: no jug_hpc.toml found in ')
+
+    project_dir, _ = local_project(tmp_path, monkeypatch, 'raise ValueError("oops")\n')
+    status = main(['-C', str(project_dir), 'status'])
+    _, err = capsys.readouterr()
+    assert status == 1
+    assert 'ValueError: oops' in err
+
 
 BARRIER = '''\
 from jug import TaskGenerator, barrier

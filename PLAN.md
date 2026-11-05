@@ -284,8 +284,22 @@ CPUs of the worker that ran them).
 
 ### Milestone 4: status, cancel and failure handling
 
-1. `jug-hpc status`: Jug's task counts grouped by class, plus queued/running
-   workers per class.
+1. Done: `jug-hpc status`: Jug's task counts grouped by class, plus
+   queued/running workers per class (`status.py`, pure; `cli.cmd_status`).
+   Decisions:
+   - Tasks are counted in a subprocess, as by the submitter (its output is
+     dropped). Every job of the backend in use in `jobs.json` is queried
+     (no state kept between runs), then `outcome()` for the finished ones.
+   - Workers counted as by `active_workers` (an unknown job within
+     `SUBMIT_GRACE` counts as queued). A class no longer in `jug_hpc.toml`
+     gets a row only while it has active workers (and a note).
+   - The submitter: who holds `submitter.lock`
+     (`ProjectState.submitter_lock_holder`, a non-blocking shared `flock`,
+     creating nothing), and the queued/running `--as-job` jobs.
+   - Notes: every task finished; blocked by failed tasks; tasks ready but no
+     active worker and no submitter ("run 'jug-hpc submit'"); jobs of
+     another backend not queried. Exit status 0 unless something can't be
+     read.
 2. `jug-hpc cancel`: cancel every job recorded for the project, including the
    submitter job. (The fake PBS has no `qdel`/`qrls` yet: held jobs stay
    held.)
@@ -311,8 +325,10 @@ CPUs of the worker that ran them).
      would need `outcome()` to return the workers' outcomes too.
    - Suggestions use the class as configured now; a class no longer in
      `jug_hpc.toml` gets none.
-   - Left for `status` (step 1): the same report from `jobs.json` and
-     `outcome()`, including jobs that ended before the submitter started.
+   - Done in `status` (step 1): the same report from `jobs.json` and
+     `outcome()`, including jobs that ended before the submitter started:
+     one warning per class and kind of kill, with the count, the last such
+     job and its suggestion.
    - Noticed while documenting it: a job that ran tasks and was then killed
      for wall time counts towards `MAX_FAILED_JOBS` when no task of the class
      ended between the poll before and the one that sees it end (step 8

@@ -177,3 +177,18 @@ def test_record_round_trip(job_id, class_name, workers, offset, seconds):
     r = JobRecord(job_id=job_id, class_name=class_name, scheduler='pbs', workers=workers,
                   script=Path('.jug_hpc/scripts') / f'{class_name}-1.sh', submitted=submitted)
     assert JobRecord.from_json(json.loads(json.dumps(r.to_json()))) == r
+
+
+# --- the submitter's lock -----------------------------------------------------------
+
+def test_submitter_lock_holder(tmp_path):
+    state = ProjectState(tmp_path)
+    assert state.submitter_lock_holder() is None
+    assert not (tmp_path / STATE_DIR).exists()
+    with state.submitter_lock():
+        holder = ProjectState(tmp_path).submitter_lock_holder()
+        assert holder.startswith(f'{os.getpid()}@')
+    # released: the lock file stays, but nobody holds it
+    assert state.submitter_lock_holder() is None
+    with state.submitter_lock():
+        pass

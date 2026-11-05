@@ -188,5 +188,7 @@ of the time. You can run it on a login node (in `tmux` or `screen`), or submit
 it as a job with `jug-hpc submit --as-job`. See {doc}`submitting`.
 
 Each worker writes its log to `logs/<class>-<job id>.log`, or
-`logs/<class>-<job id>-<index>.log` for an element of a job array. Use plain
-`jug status` to follow progress, as usual.
+`logs/<class>-<job id>-<index>.log` for an element of a job array. Follow
+progress with `jug-hpc status`, which shows the tasks of each class in each
+state and its queued and running workers (plain `jug status` works too, as
+usual).

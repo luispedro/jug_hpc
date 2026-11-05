@@ -300,6 +300,41 @@ class ProjectState:
         finally:
             os.close(fd)
 
+    def submitter_lock_holder(self):
+        '''Who holds the submitter's lock, without waiting for it
+
+        Nothing is created. The lock is taken for a moment if it is free, so a
+        submitter started at that very moment may find it held.
+
+        Returns
+        -------
+        holder : str or None
+            ``pid@host`` as written by :meth:`submitter_lock` (empty if the
+            file does not say), or None if no process holds the lock
+
+        Raises
+        ------
+        StateError
+            If the lock file exists but cannot be opened or locked
+        '''
+        lock = self.path / _SUBMITTER_LOCK_FILE
+        try:
+            fd = os.open(lock, os.O_RDONLY)
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            raise StateError(f'{lock}: cannot open lock file: {e}') from e
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return os.pread(fd, 256, 0).decode(errors='replace').strip()
+            except OSError as e:
+                raise StateError(f'{lock}: cannot lock: {e}') from e
+            return None
+        finally:
+            os.close(fd)
+
     @contextlib.contextmanager
     def _locked(self):
         lock = self.path / _LOCK_FILE

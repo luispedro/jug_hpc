@@ -28,6 +28,7 @@ from .units import format_dhms, format_memory
 __all__ = [
     'KILLED',
     'kill_counts',
+    'kill_reason',
     'kill_summary',
     'scheduler_kills',
     'suggestion',
@@ -78,6 +79,11 @@ def kill_counts(kills):
         by_outcome[outcome.outcome] = by_outcome.get(outcome.outcome, 0) + 1
     return {name: dict(sorted(by_outcome.items(), key=lambda i: OUTCOME_SEVERITY.index(i[0])))
             for name, by_outcome in counts.items()}
+
+
+def kill_reason(outcome):
+    '''``for memory``, ``for wall time`` or ``by a signal``, for an Outcome in :data:`KILLED`'''
+    return _WHY[outcome]
 
 
 def kill_summary(by_outcome):

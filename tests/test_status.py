@@ -1,0 +1,162 @@
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+from jug_hpc.config import load_project_settings
+from jug_hpc.jugstate import TaskCounts
+from jug_hpc.schedulers import JobId, JobOutcome, JobState, JobStatus, Outcome
+from jug_hpc.state import JobRecord
+from jug_hpc.status import WorkerCounts, status, worker_counts
+from jug_hpc.submitter import SUBMIT_GRACE
+
+NOW = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
+LONG_AGO = NOW - timedelta(hours=1)
+
+MEMORY = JobOutcome(Outcome.KILLED_MEMORY, -27, None, 'memory limit exceeded')
+TIME = JobOutcome(Outcome.KILLED_TIME, -29, None, 'wall time limit exceeded')
+FAILED = JobOutcome(Outcome.FAILED, 3, None, 'exit status 3')
+CANCELLED = JobOutcome(Outcome.CANCELLED, 143, 15, 'deleted with qdel')
+OK = JobOutcome(Outcome.SUCCESS, 0)
+
+FINISHED = JobStatus(JobState.FINISHED)
+UNKNOWN = JobStatus(JobState.UNKNOWN)
+
+
+def record(job_id, class_name='default', workers=1, scheduler='pbs', submitted=LONG_AGO):
+    return JobRecord(job_id=JobId(job_id), class_name=class_name, scheduler=scheduler,
+                     workers=workers, script=Path(f'.jug_hpc/scripts/{class_name}-1.sh'),
+                     submitted=submitted)
+
+
+@pytest.fixture
+def project(tmp_path):
+    (tmp_path / 'jugfile.py').write_text('')
+    (tmp_path / 'jug_hpc.toml').write_text('''\
+[default]
+memory = "2G"
+time = "1h"
+
+[class.big]
+match = "big"
+memory = "8G"
+''')
+    return load_project_settings(tmp_path)
+
+
+def test_worker_counts():
+    records = [record('1', 'big', 4), record('2'), record('3', 'big', 2),
+               record('4', workers=3, submitted=NOW - timedelta(seconds=10)),
+               record('5', workers=5), record('6')]
+    statuses = {'1': JobStatus(JobState.RUNNING, queued=1, running=2),
+                '2': FINISHED,
+                '3': JobStatus(JobState.QUEUED, queued=2),
+                '4': UNKNOWN,       # just submitted: all queued
+                '5': UNKNOWN}       # forgotten long ago: none
+    counts = worker_counts(records, statuses, NOW)
+    assert counts == {'big': WorkerCounts(3, 2), 'default': WorkerCounts(3, 0)}
+    assert list(counts) == ['big', 'default']
+    assert counts['big'].active == 5
+    later = NOW + timedelta(seconds=SUBMIT_GRACE)
+    assert worker_counts(records, statuses, later)['default'] == WorkerCounts()
+    assert worker_counts([], {}, NOW) == {}
+
+
+def test_status_table(project):
+    by_class = {'big': TaskCounts(waiting=1, ready=12, running=3, finished=100),
+                'default': TaskCounts(ready=2, failed=1, finished=4)}
+    records = [record('11', 'big', 4), record('12'), record('13', 'submitter')]
+    statuses = {'11': JobStatus(JobState.RUNNING, queued=1, running=3), '12': FINISHED,
+                '13': JobStatus(JobState.RUNNING, running=1)}
+    report = status(project, by_class, False, records, statuses, {'12': OK}, NOW,
+                    scheduler_name='pbs')
+    assert report.text.splitlines() == [
+        '                               tasks                        workers',
+        'class        waiting  ready  running  failed  finished  queued  running',
+        '[class.big]        1     12        3       0       100       1        3',
+        '[default]          0      2        0       1         4       0        0',
+        'total              1     14        3       1       104       1        3',
+        '',
+        'Submitter: job 13, running',
+    ]
+    assert report.warnings == []
+    assert report.notes == []
+
+
+def test_status_submitter(project):
+    by_class = {'big': TaskCounts(ready=1), 'default': TaskCounts()}
+    records = [record('1', 'submitter'), record('2', 'submitter')]
+    statuses = {'1': FINISHED, '2': JobStatus(JobState.QUEUED, queued=1)}
+
+    def line(**kwargs):
+        report = status(project, by_class, False, records, statuses, {}, NOW,
+                        scheduler_name='pbs', **kwargs)
+        return report.text.splitlines()[-1], report.notes
+
+    assert line() == ('Submitter: job 2, queued', [])
+    assert line(lock_holder='123@login1') == (
+        'Submitter: running (process 123@login1); job 2, queued', [])
+    statuses['2'] = FINISHED
+    assert line(lock_holder='') == ('Submitter: running', [])
+    # the submitter's job runs no task, so it is not in the table
+    assert line() == ('Submitter: not running', [
+        ("tasks are ready, but no worker is queued or running and no submitter is "
+        "running: run 'jug-hpc submit'")])
+
+
+def test_status_kills(project):
+    by_class = {'big': TaskCounts(ready=1), 'default': TaskCounts(finished=3)}
+    records = [record('1', 'big'), record('2', 'big'), record('3'), record('4', 'big'),
+               record('5', 'old'), record('6', 'big'), record('7')]
+    statuses = {r.job_id: FINISHED for r in records}
+    outcomes = {'1': MEMORY, '2': TIME, '3': FAILED, '4': MEMORY, '5': TIME,
+                '6': CANCELLED, '7': OK}
+    report = status(project, by_class, False, records, statuses, outcomes, NOW,
+                    scheduler_name='pbs', lock_holder='9@x')
+    assert report.warnings == [
+        ('[class.big]: 2 jobs killed for memory (the last: job 4: memory limit exceeded); '
+         'raise memory (now 8G)'),
+        ('[class.big]: 1 job killed for wall time (the last: job 2: wall time limit '
+         'exceeded); raise time (now 01:00:00), or lower time_fraction (now 0.8: a task '
+         'started after 00:48:00 has 00:12:00 left)'),
+        # no suggestion for a class no longer in jug_hpc.toml
+        '[class.old]: 1 job killed for wall time (the last: job 5: wall time limit exceeded)',
+    ]
+    # a class no longer in jug_hpc.toml without workers is not in the table
+    assert report.notes == []
+    assert [line.split()[0] for line in report.text.splitlines()[2:5]] == [
+        '[class.big]', '[default]', 'total']
+
+    # ... but it is while it has workers
+    records.append(record('8', 'old', 3))
+    statuses['8'] = JobStatus(JobState.RUNNING, queued=1, running=2)
+    report = status(project, by_class, False, records, statuses, outcomes, NOW,
+                    scheduler_name='pbs', lock_holder='9@x')
+    assert report.text.splitlines()[4].split() == ['[class.old]', '0', '0', '0', '0', '0',
+                                                   '1', '2']
+    assert report.notes == [
+        ('not in jug_hpc.toml any more, but with workers queued or running: [class.old] '
+         '(its tasks are counted in the classes that match them now)')]
+
+
+def test_status_notes(project):
+    finished = {'big': TaskCounts(finished=2), 'default': TaskCounts(finished=1)}
+    records = [record('1', scheduler='local'), record('2', scheduler='local'), record('3')]
+    report = status(project, finished, False, records, {'3': FINISHED}, {}, NOW,
+                    scheduler_name='pbs')
+    assert report.notes == [
+        'every task is finished',
+        ("2 jobs submitted with the 'local' backend not asked about (the backend in use is "
+        "'pbs')")]
+    # the local jobs are not counted
+    assert report.text.splitlines()[3].split() == ['[default]', '0', '0', '0', '0', '1',
+                                                   '0', '0']
+
+    blocked = {'big': TaskCounts(failed=2, waiting=1), 'default': TaskCounts(finished=1)}
+    report = status(project, blocked, False, [], {}, {}, NOW, scheduler_name='pbs')
+    assert report.notes == ['no task can run: failed tasks: [class.big] 2']
+
+    barrier = {'big': TaskCounts(), 'default': TaskCounts(finished=1)}
+    report = status(project, barrier, True, [], {}, {}, NOW, scheduler_name='pbs')
+    assert report.notes == []
+    assert '(more tasks will appear after a barrier)' in report.text.splitlines()

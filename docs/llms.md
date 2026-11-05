@@ -166,6 +166,7 @@ is not installed are accepted, with a warning from `jug-hpc config`.
 |---|---|---|
 | `jug-hpc config` | Prints the merged cluster settings (with the file each value came from) and every class fully resolved. Checks the raw scheduler tables. | 0, or 1 on any error |
 | `jug-hpc check` | Loads the jugfile and lists the tasks of each class. Never reads `cluster.toml`, so it runs anywhere. Overlaps are errors; a class matching no task is a warning (often a typo). | 0, or 1 on errors |
+| `jug-hpc status` | Prints a table: per class, tasks waiting/ready/running/failed/finished (loads the jugfile in a subprocess) and workers queued/running (asks the scheduler about every job of the backend in use in `.jug_hpc/jobs.json`), then `Submitter: running (process pid@host)`, `job N, queued`/`running` or `not running`. Warnings: per class and kind (memory, wall time, signal), the jobs killed by the scheduler, with a suggestion. Notes: every task finished; failed tasks block the run; tasks ready but no worker and no submitter. Changes nothing; no lock needed. | 0, or 1 if settings, jugfile, `jobs.json` or scheduler can't be read |
 | `jug-hpc submit` | The polling submitter (below). Only one per project, enforced with a lock. | 0 all finished; 1 blocked by failed tasks, stalled by failing workers, or an error; 130 on Ctrl-C |
 | `jug-hpc submit --as-job` | Submits the polling submitter as a job (`[submitter]` resources; log `logs/submitter-<job id>.log`), and exits. Checks the settings and the jugfile first. Submits nothing if a submitter is running or queued, or no task is left. | 0, or 1 |
 | `jug-hpc submit --all [CLASS...]` | Submits every class with tasks at once (at most one worker per task), and exits. For graphs whose classes don't wait for each other. `default` names the default class. A named class is submitted even with no tasks. | 0, or 1 |
@@ -180,10 +181,9 @@ Listings go to stdout. Messages go to stderr as `jug-hpc: error: ...`,
 `jug-hpc: warning: ...` or `jug-hpc: note: ...`. Error messages about
 configuration name the file and the key.
 
-Not implemented: `jug-hpc status`, `jug-hpc cancel`, SLURM, named cluster
-profiles, detection of stale locks. Use `jug status` for progress, and
-`.jug_hpc/jobs.json` with the scheduler's own commands (`qstat`, `qdel`) to
-find or cancel jobs.
+Not implemented: `jug-hpc cancel`, SLURM, named cluster profiles, detection
+of stale locks. Use `.jug_hpc/jobs.json` with the scheduler's own commands
+(`qdel`) to cancel jobs.
 
 ## How the polling submitter works
 
@@ -254,9 +254,9 @@ the raw `directives`.
 | Symptom | Likely cause | What to suggest |
 |---|---|---|
 | `[class.x]: 3 jobs in a row ended in error ...`, exit status 127 | A command in `setup` fails (e.g. `module` missing, wrong venv path), or `jug` is not on `PATH` in the job. | Read `logs/<class>-<job>-<index>.log` and `logs/scheduler/`. Fix `setup`. Run `jug-hpc submit` again. |
-| Warning `job N ended: killed: wall time limit reached; raise time ...` | A task started near the end of the wall time did not finish. | Raise `time`, or lower `time_fraction` so that `(1 − time_fraction) × time` is longer than the longest task. For tasks that take most of the wall time, use a class where each worker runs one task. |
+| Warning `job N ended: killed: wall time limit reached; raise time ...` (from `jug-hpc status`: `N jobs killed for wall time ...`) | A task started near the end of the wall time did not finish. | Raise `time`, or lower `time_fraction` so that `(1 − time_fraction) × time` is longer than the longest task. For tasks that take most of the wall time, use a class where each worker runs one task. |
 | Warning `job N ended: killed ... memory` or `SIGKILL` | Used more memory than `memory`. On cgroup clusters an out-of-memory kill appears only as SIGKILL (exit 137 or 265), so the memory diagnosis is a guess. | Raise `memory` for that class. |
-| The submitter never finishes; `jug status` shows tasks running but no worker runs | A worker killed by SIGKILL left its task's lock. jug_hpc does not detect stale locks yet. | Use `jugdir = "file_keepalive:<dir>"` (same storage format, so an existing jugdir can be switched): unrefreshed locks count as failed after 30 minutes, then `jug cleanup --failed-only`. With a plain jugdir, `jug cleanup --locks-only` only when **no** worker is running. |
+| The submitter never finishes; `jug-hpc status` shows tasks running but no worker running | A worker killed by SIGKILL left its task's lock. jug_hpc does not detect stale locks yet. | Use `jugdir = "file_keepalive:<dir>"` (same storage format, so an existing jugdir can be switched): unrefreshed locks count as failed after 30 minutes, then `jug cleanup --failed-only`. With a plain jugdir, `jug cleanup --locks-only` only when **no** worker is running. |
 | `no task can run: failed tasks: ...` | Tasks raised exceptions. | Read the worker logs, fix the code, `jug cleanup --failed-only`, then `jug-hpc submit` again. |
 | Workers of a later class start and exit without doing anything | They were submitted with `--all` before their dependencies ran. | Use plain `jug-hpc submit`, which waits until the tasks are ready. |
 | Error naming the process (and host) of another submitter | One submitter already runs for this project. | Use that one, or stop it first. |

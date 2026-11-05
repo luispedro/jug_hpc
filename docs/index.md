@@ -3,8 +3,8 @@
 ```{warning}
 jug_hpc is in early development and has not had a release yet. The commands
 described here work, and the PBS backend has been tested on one real PBS
-Professional cluster as well as a simulated one. `jug-hpc status` and
-`jug-hpc cancel` are not written yet, and SLURM is not supported yet.
+Professional cluster as well as a simulated one. `jug-hpc cancel` is not
+written yet, and SLURM is not supported yet.
 ```
 
 ## What is jug_hpc?
