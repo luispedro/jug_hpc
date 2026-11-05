@@ -37,6 +37,16 @@ exiting (see :data:`jug_hpc.script.NR_WAIT_CYCLES`), and a queued one would
 still start. Workers are left alone when every task is finished: they exit at
 once.
 
+Tasks locked in a class with no worker queued or running were most likely
+left locked by a worker that died while running them (see
+:func:`jug_hpc.submitter.locked_without_workers`): Jug counts them as running,
+so the run would never end. A poll that sees this for a class at the poll
+before too reports it (:attr:`PollResult.stale_locks`), once while it lasts:
+two polls in a row, so that a worker that has just ended, or a ``jug
+execute`` run by hand for a moment, is not reported. The submitter keeps
+polling: ``jug-hpc status --release-stale`` removes the locks, and the tasks
+are then ready, so the next poll submits workers for them.
+
 Jug's status cache (``jug status --cache``) is not used: it is fast because
 it does not load the jugfile again, so it would miss the tasks created after a
 ``barrier()`` and the changes to the jugfile. Measured on a jugfile with 100k
@@ -68,6 +78,7 @@ from .submitter import (
     class_limits,
     is_settled,
     jobs_to_query,
+    locked_without_workers,
     progress,
     stopped_classes,
     update_failing,
@@ -130,6 +141,10 @@ class PollResult:
     cancel_error : SchedulerError or None
         Why they could not be cancelled (the run is over all the same: they
         exit by themselves once Jug gives up waiting)
+    stale_locks : dict
+        Class name -> number of locked tasks, for the classes that have locked
+        tasks but no worker queued or running at this poll and the one
+        before, and were not reported since that began
     output : str
         What the jugfile wrote while it was loaded
     '''
@@ -143,6 +158,7 @@ class PollResult:
     errors: list = field(default_factory=list)
     cancelled: list = field(default_factory=list)
     cancel_error: object = None
+    stale_locks: dict = field(default_factory=dict)
     output: str = ''
 
 
@@ -198,6 +214,10 @@ class Submitter:
         self.previous = None
         #: Class name -> the jobs that ended in error (see ``update_failing``)
         self.failing = {}
+        #: Classes with locked tasks and no worker at the previous poll
+        self.locked = set()
+        #: Classes in ``locked`` already reported in ``PollResult.stale_locks``
+        self.reported_locks = set()
 
     def poll(self):
         '''Query the jobs, count the tasks, and submit the workers needed
@@ -249,8 +269,13 @@ class Submitter:
         stopped = stopped_classes(self.failing)
         stalled = {n: jobs for n, jobs in stopped.items() if not active.get(n)}
         report = progress(by_class, counted.hit_barrier, stalled)
+        locked = set(locked_without_workers(by_class, active))
+        stale_locks = {n: by_class[n].running for n in by_class
+                       if n in locked & self.locked and n not in self.reported_locks}
+        self.reported_locks = (self.reported_locks | stale_locks.keys()) & locked
+        self.locked = locked
         result = PollResult(by_class, counted.hit_barrier, active, report, stopped, ended,
-                            output=counted.output)
+                            stale_locks=stale_locks, output=counted.output)
         if report.progress in (Progress.BLOCKED, Progress.STALLED):
             self._cancel_idle(result, active_jobs(records, statuses, now), statuses)
         if report.progress is not Progress.RUNNING:

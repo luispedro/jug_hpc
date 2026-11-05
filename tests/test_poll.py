@@ -596,6 +596,55 @@ def test_cli_kill_messages(setup):
         '(Exit_status -27)')
 
 
+def test_poll_reports_stale_locks(setup):
+    '''Locked tasks without workers at two polls in a row, once while it lasts'''
+    from jug_hpc.status import lock_warning
+    submitter, counts, sched, state, _ = setup
+    counts.set(LOAD, finished=1)
+    counts.set(ALIGN, running=2, finished=1)
+    counts.set(MERGE, waiting=1)
+    r = submitter.poll()
+    assert r.report.progress is Progress.RUNNING
+    assert r.stale_locks == {}
+    r = submitter.poll()
+    assert r.stale_locks == {'align': 2}
+    assert submitted(r) == []
+    assert lock_warning('align', 2, submitter=True) == (
+        "[class.align]: 2 tasks are locked, but no worker of the class is queued or running: "
+        "unless a 'jug execute' started outside jug-hpc is running them, the workers that "
+        'locked them died (e.g., killed by the scheduler) and left their locks behind, so no '
+        'worker will run them and this submitter will not finish (remove the locks with '
+        "'jug-hpc status --release-stale': workers are then submitted for them)")
+    assert submitter.poll().stale_locks == {}
+
+    # a worker of the class may hold the locks: it ends, the locks are left
+    state.add_job('99.pbs', 'align', 'pbs', 1, '.jug_hpc/scripts/align-1.sh')
+    sched.statuses['99.pbs'] = JobStatus(JobState.RUNNING, running=1)
+    assert submitter.poll().stale_locks == {}
+    sched.statuses['99.pbs'] = JobStatus(JobState.FINISHED)
+    assert submitter.poll().stale_locks == {}
+    assert submitter.poll().stale_locks == {'align': 2}
+
+    # the locks are released: their tasks get workers again
+    counts.set(ALIGN, ready=2, finished=1)
+    r = submitter.poll()
+    assert r.stale_locks == {}
+    assert submitted(r) == [('align', 2)]
+
+
+def test_poll_failed_poll_keeps_lock_state(setup):
+    '''A failed poll in between: the polls before and after are in a row'''
+    submitter, counts, sched, state, _ = setup
+    counts.set(ALIGN, running=1)
+    state.add_job('99.pbs', 'default', 'pbs', 1, '.jug_hpc/scripts/default-1.sh')
+    sched.statuses['99.pbs'] = JobStatus(JobState.QUEUED, queued=1)  # not of the class
+    assert submitter.poll().stale_locks == {}
+    sched.fail_query = 1
+    with pytest.raises(SchedulerError):
+        submitter.poll()
+    assert submitter.poll().stale_locks == {'align': 1}
+
+
 def test_poll_failed_outcome_query_changes_nothing(setup):
     submitter, counts, sched, _state, _ = setup
     counts.set(ALIGN, ready=3)

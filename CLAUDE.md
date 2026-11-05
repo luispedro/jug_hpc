@@ -29,8 +29,9 @@ to report jobs killed by the scheduler in the submitter's log, with what to chan
 (step 4, `kills.py`), and `jug-hpc status` (step 1, `status.py`: tasks and workers per
 class, the submitter, and the kills of every recorded job), and `jug-hpc cancel`
 (step 2, `cancel.py`; PBS `cancel()` with `qdel`), and the submitter cancelling the
-workers left when no task can run (step 7), and `status` warning about locks left by
-dead workers and `status --release-stale` removing them (step 5).
+workers left when no task can run (step 7), and `status` and the submitter's log
+warning about locks left by dead workers and `status --release-stale` removing them
+(step 5).
 
 ## Commands
 
@@ -143,12 +144,14 @@ paths replaced by `/home/me/rnaseq`.
   skipping stopped classes), `update_failing`/`stopped_classes` (a class whose last
   `MAX_FAILED_JOBS` jobs ended in error with no task of it ending gets no new workers), and
   `progress` (keep polling / finished / blocked by failed tasks / stalled by failing
-  workers).
+  workers), and `locked_without_workers` (stale locks; also used by `status.py`).
 - **`poll.py`**: the loop around them. `Submitter.poll()` does one poll (`query`, then
   `outcome` of the jobs it saw end, then counts in a subprocess, then submissions via
   `submit.prepare_class`/`write_script`/`submit_worker`); state kept between polls: settled
   and watched job IDs, the previous counts, and the failing jobs per class (committed only
   after everything that can fail was read, so a failed poll can be redone).
+  Locked tasks without workers at two polls in a row: `PollResult.stale_locks` (once
+  while it lasts; `cli._poll` warns with `status.lock_warning(..., submitter=True)`).
   The poll that ends a run `BLOCKED`/`STALLED` cancels the worker jobs still active
   (`PollResult.cancelled`/`cancel_error`; a failed cancel is only a warning).
   `run()` repeats it, doubling the wait while nothing changes (up to `max_interval`);

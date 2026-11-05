@@ -462,6 +462,7 @@ def _poll(args, start):
     from .poll import Submitter, run
     from .schedulers.base import SchedulerError, create_scheduler
     from .state import ProjectState, StateError
+    from .status import lock_warning
 
     project_dir = find_project_dir(start)
     if project_dir is None:
@@ -488,6 +489,8 @@ def _poll(args, start):
                  f'({workers} worker{"s" if workers != 1 else ""}, {record.script})')
         for e in result.errors:
             _error(e)
+        for name, n in result.stale_locks.items():
+            _message('warning', lock_warning(name, n, submitter=True))
         summary = _poll_summary(result)
         if summary != last[0]:
             _log(summary)

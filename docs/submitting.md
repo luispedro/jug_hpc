@@ -152,6 +152,27 @@ ended. The values in the suggestion are the class's current ones. The local
 backend enforces only the wall time. `jug-hpc status` reports the killed jobs
 too (see [below](#following-a-run-jug-hpc-status)).
 
+A worker killed with `SIGKILL` can't release the lock of the task it was
+running, so Jug counts that task as running, and the run can't end. When the
+submitter sees locked tasks in a class with no worker queued or running at two
+polls in a row, it warns, once while this lasts, and keeps polling. Here,
+after the worker running the only task was killed:
+
+```
+[2026-11-05 20:03:17] default: submitted job 1 (1 worker, .jug_hpc/scripts/default-1.sh)
+[2026-11-05 20:03:17] tasks: 0 waiting, 1 ready, 0 running, 0 failed, 0 finished; workers queued or running: 1
+jug-hpc: warning: [default]: job 1 ended: killed by SIGKILL; if it used more memory than requested, raise memory (now 1G)
+[2026-11-05 20:03:20] tasks: 0 waiting, 0 ready, 1 running, 0 failed, 0 finished; workers queued or running: 0
+jug-hpc: warning: [default]: 1 task is locked, but no worker of the class is queued or running: unless a 'jug execute' started outside jug-hpc is running it, the worker that locked it died (e.g., killed by the scheduler) and left its lock behind, so no worker will run it and this submitter will not finish (remove the lock with 'jug-hpc status --release-stale': workers are then submitted for it)
+```
+
+Once you have fixed the cause (here, probably by raising `memory`), `jug-hpc
+status --release-stale` (see [below](#following-a-run-jug-hpc-status))
+removes the locks; the tasks are then ready, and the submitter's next poll
+submits workers for them. With the `file_keepalive:` jugdir backend, such a
+lock counts as failed after 30 minutes instead, so the run ends (see the
+{doc}`faq`).
+
 ### How often it polls
 
 Each poll loads the jugfile and queries the scheduler, so the submitter backs
@@ -456,9 +477,9 @@ jug_hpc is in early development. In particular:
   `SIGKILL` (for example for exceeding its memory) leaves its task's lock
   behind (one killed with `SIGTERM`, as for wall time, usually releases it).
   With a plain jugdir, Jug then counts the task as running forever, so the
-  submitter never finishes and its log does not say why: `jug-hpc status`
-  reports such locks, and `jug-hpc status --release-stale` removes them. With
-  the `file_keepalive:` jugdir backend, a lock that is not refreshed for 30
+  submitter never finishes: it warns about such locks (as does `jug-hpc
+  status`), and `jug-hpc status --release-stale` removes them. With the
+  `file_keepalive:` jugdir backend, a lock that is not refreshed for 30
   minutes counts as failed instead, so the run ends (see the {doc}`faq`).
 - The submitter loads the jugfile at every poll. For jugfiles with millions of
   tasks, use a longer `--interval` and `--max-interval`.

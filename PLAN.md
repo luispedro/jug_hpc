@@ -221,8 +221,8 @@ Decisions taken there that later steps depend on:
   counts all its workers as queued, since a scheduler may not list a job it
   has just accepted.
 - Workers still queued or running don't delay the exit. A dead worker's lock
-  keeps its task "running" forever, so the submitter never exits until
-  milestone 4 step 5 handles stale locks.
+  keeps its task "running" forever, so the submitter never exits (it warns;
+  milestone 4 step 5).
 - The `--as-job` submitter job's resources are a `[submitter]` table in
   `jug_hpc.toml`; nothing is inherited from `[default]`, and `submitter` is a
   reserved class name.
@@ -358,9 +358,9 @@ CPUs of the worker that ran them).
      rule). Fine for a task that never fits, but maybe count only jobs that
      ran no task (would need per-job task counts; not done). Decided
      (2026-11-05): keep the rule as it is for now.
-5. Done (except in the submitter's log and `check`): stale locks. Reported
-   by `status` (`status.stale_lock_classes`), removed by `jug-hpc status
-   --release-stale`. Decisions:
+5. Done (except in `check`, step 6): stale locks. Reported by `status` and
+   in the submitter's log (`submitter.locked_without_workers`), removed by
+   `jug-hpc status --release-stale`. Decisions:
    - Jug lock files hold `PID ... on HOSTNAME ...` but no job ID, so locks
      are not tied to jobs. Instead: a class whose tasks are locked (Jug's
      `running` count) while no worker of the class is queued or running
@@ -373,9 +373,15 @@ CPUs of the worker that ran them).
    - A `jug execute` run by hand (or with another backend's jobs) is
      reported too; the warning says so ("unless a 'jug execute' started
      outside jug-hpc is running it").
-   - Not in the submitter's log yet: it keeps polling (`RUNNING`) while
-     tasks are locked. It could warn once per class when it sees locked
-     tasks with no active worker for two polls in a row.
+   - The submitter keeps polling (`RUNNING`) while tasks are locked, and
+     warns (`PollResult.stale_locks`) about a class with locked tasks and no
+     active worker (as for the submission rule, so a recent unknown job
+     counts) at two successful polls in a row (a worker that just ended, or a
+     short `jug execute` by hand, is not reported), once while that lasts;
+     again if it comes back (e.g. a new worker killed after
+     `--release-stale`). The message says what `--release-stale` then does
+     (the next poll submits workers). It does not end the run or cancel
+     anything: the locks may be a `jug execute` outside jug-hpc.
    - With `file_keepalive`, Jug counts a dead worker's lock as *failed*
      after 30 minutes (`is_failed`: mtime older than 30 min), so the run
      ends `BLOCKED` (and `jug cleanup --failed-only` frees it); before

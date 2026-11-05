@@ -17,6 +17,7 @@ from jug_hpc.submitter import (
     class_limits,
     is_settled,
     jobs_to_query,
+    locked_without_workers,
     progress,
     stopped_classes,
     submitter_jobs,
@@ -164,6 +165,16 @@ def test_workers_to_submit_property(c, limit, active):
         assert active + n == min(c.ready, limit)
     else:
         assert active >= min(c.ready, limit)
+
+
+def test_locked_without_workers():
+    by_class = {'big': TaskCounts(running=2), 'small': TaskCounts(running=1),
+                'default': TaskCounts(ready=3)}
+    assert locked_without_workers(by_class, {}) == ('big', 'small')
+    assert locked_without_workers(by_class, {'big': 1, 'small': 0}) == ('small',)
+    # workers of a class no longer in jug_hpc.toml may run any of them
+    assert locked_without_workers(by_class, {'old': 1}) == ()
+    assert locked_without_workers(by_class, {'old': 0}) == ('big', 'small')
 
 
 def test_class_limits(tmp_path):

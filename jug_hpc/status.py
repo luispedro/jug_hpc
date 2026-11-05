@@ -44,15 +44,21 @@ from .config.project import SUBMITTER
 from .jugstate import STATES, TaskCounts
 from .kills import kill_counts, kill_reason, scheduler_kills, suggestion
 from .schedulers.base import JobState
-from .submitter import SUBMIT_GRACE, Progress, active_submitter_jobs, progress
+from .submitter import (
+    SUBMIT_GRACE,
+    Progress,
+    active_submitter_jobs,
+    locked_without_workers,
+    progress,
+)
 
 __all__ = [
     'StatusReport',
     'WorkerCounts',
     'classes_to_release',
+    'lock_warning',
     'locks_to_release',
     'release_messages',
-    'stale_lock_classes',
     'status',
     'worker_counts',
 ]
@@ -125,7 +131,7 @@ class StatusReport:
         them, jobs of another backend were not asked about, ...
     stale : tuple of str
         The classes warned about for locked tasks without workers (see
-        :func:`stale_lock_classes`)
+        :func:`jug_hpc.submitter.locked_without_workers`)
     '''
     text: str
     warnings: list = field(default_factory=list)
@@ -220,29 +226,9 @@ def status(project, by_class, hit_barrier, records, statuses, outcomes, now, *,
 
     ended = [(r, outcomes[r.job_id]) for r in workers_jobs if r.job_id in outcomes]
     warnings = _kill_warnings(project, scheduler_kills(ended))
-    stale = () if unknown else stale_lock_classes(by_class, workers)
-    warnings.extend(_lock_warning(name, by_class[name].running) for name in stale)
+    stale = locked_without_workers(by_class, {n: w.active for n, w in workers.items()})
+    warnings.extend(lock_warning(name, by_class[name].running) for name in stale)
     return StatusReport('\n'.join(lines), warnings, notes, stale)
-
-
-def stale_lock_classes(by_class, workers):
-    '''The classes with locked tasks but no worker queued or running
-
-    Parameters
-    ----------
-    by_class : dict
-        Class name -> TaskCounts
-    workers : dict
-        Class name -> :class:`WorkerCounts` (as returned by
-        :func:`worker_counts`)
-
-    Returns
-    -------
-    names : tuple of str
-        In the order of ``by_class``
-    '''
-    return tuple(name for name, tc in by_class.items()
-                 if tc.running and not workers.get(name, WorkerCounts()).active)
 
 
 def classes_to_release(stale, records, statuses, now, *, scheduler_name,
@@ -346,19 +332,39 @@ def _kill_warnings(project, kills):
     return warnings
 
 
-def _lock_warning(name, n):
-    '''Locked tasks of a class without workers (see the module docstring)'''
+def lock_warning(name, n, *, submitter=False):
+    '''The warning about the locked tasks of a class without workers
+
+    Parameters
+    ----------
+    name : str
+        The class
+    n : int
+        Its locked tasks
+    submitter : bool, optional
+        For the submitter's log (which says what it then does), rather than
+        ``jug-hpc status``
+
+    Returns
+    -------
+    message : str
+    '''
     if n == 1:
         what, it, workers_that, its_locks = '1 task is', 'it', 'worker that', 'its lock'
     else:
         what, it, workers_that, its_locks = (f'{n} tasks are', 'them', 'workers that',
                                              'their locks')
     locks = 'lock' if n == 1 else 'locks'
+    if submitter:
+        end = (f"this submitter will not finish (remove the {locks} with 'jug-hpc status "
+               f"--release-stale': workers are then submitted for {it})")
+    else:
+        end = (f"the submitter will not finish (remove the {locks} with 'jug-hpc status "
+               "--release-stale')")
     return (f'{_label(name)}: {what} locked, but no worker of the class is queued or '
             f"running: unless a 'jug execute' started outside jug-hpc is running {it}, "
             f'the {workers_that} locked {it} died (e.g., killed by the scheduler) and '
-            f'left {its_locks} behind, so no worker will run {it} and the submitter '
-            f"will not finish (remove the {locks} with 'jug-hpc status --release-stale')")
+            f'left {its_locks} behind, so no worker will run {it} and {end}')
 
 
 def _submitter_line(active_jobs, statuses, lock_holder):

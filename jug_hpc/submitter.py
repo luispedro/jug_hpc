@@ -24,6 +24,9 @@ can be tested without a scheduler or a jugfile:
   error, and :func:`stopped_classes` says which classes get no more workers
   because of them;
 - :func:`progress` says whether to keep polling (:class:`Progress`);
+- :func:`locked_without_workers` finds the classes whose tasks are locked
+  while no worker of theirs is queued or running (locks left by dead workers,
+  which keep the run from ending; see :mod:`jug_hpc.status`);
 - :func:`active_submitter_jobs` finds a submitter job (``jug-hpc submit
   --as-job``) still queued or running, so that a second one is not
   submitted (:func:`active_jobs` does the same for any jobs, e.g. those
@@ -71,6 +74,7 @@ __all__ = [
     'class_limits',
     'is_settled',
     'jobs_to_query',
+    'locked_without_workers',
     'progress',
     'stopped_classes',
     'submitter_jobs',
@@ -327,6 +331,34 @@ def stopped_classes(failing, limit=MAX_FAILED_JOBS):
         with at least ``limit`` failed jobs
     '''
     return {name: jobs for name, jobs in failing.items() if len(jobs) >= limit}
+
+
+def locked_without_workers(by_class, active):
+    '''The classes with locked tasks but no worker queued or running
+
+    Workers run only their class's tasks, so nothing jug-hpc runs holds those
+    locks: most likely, a worker died while running the tasks and left their
+    locks behind (or a ``jug execute`` started outside jug-hpc runs them).
+
+    Parameters
+    ----------
+    by_class : dict
+        Class name -> TaskCounts (locked tasks are Jug's ``running``)
+    active : dict
+        Class name -> queued and running workers (as returned by
+        :func:`active_workers`); missing classes have none
+
+    Returns
+    -------
+    names : tuple of str
+        In the order of ``by_class``; none while a class not in ``by_class``
+        (no longer in ``jug_hpc.toml``) has workers queued or running, as
+        they may run tasks now counted in other classes
+    '''
+    if any(n not in by_class and a for n, a in active.items()):
+        return ()
+    return tuple(name for name, tc in by_class.items()
+                 if tc.running and not active.get(name))
 
 
 def workers_to_submit(by_class, active, limits, stopped=()):
