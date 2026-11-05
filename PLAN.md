@@ -491,13 +491,150 @@ exceeds its wall time produces a correct per-class report on PBS. →
 
 - Named cluster profiles (`--cluster <name>`, `JUG_HPC_CLUSTER`) for home
   directories shared between clusters.
-- Recording task durations per class, and warning when a typical task is
-  longer than the margin `(1 - time_fraction) × time`.
-- Automatic retry with more resources after a memory or wall-time kill
-  (opt-in, with an upper bound).
+- Smart limits, phases A and B (below): recording task durations and memory
+  per class, warning when a typical task is longer than the margin
+  `(1 - time_fraction) × time`, and `jug-hpc suggest`.
+- Smart limits, phase C: adapting resources automatically, including retry
+  with more resources after a memory or wall-time kill (opt-in, with an
+  upper bound).
 - Scheduler dependencies (strategy 1) as an optimization for simple chains,
   avoiding the long-running submitter.
 - More backends: Torque, SGE, LSF.
+
+### Smart limits (after 1.0; brainstorm, nothing decided)
+
+Use measurements from the first tasks of a class to size its later
+workers. Built in three phases, each useful on its own and each validated on
+real data before the next: **record → suggest → act**.
+
+Ideas (roughly by expected value):
+
+- Pilot batch: submit a few workers first, more once there is an estimate
+  of time per task (`workers = ceil(remaining × mean task time / target
+  makespan)`, capped by `workers`).
+- Memory down: after N tasks, `memory = p95(peak) × headroom`, rounded to
+  coarse steps (smaller requests start sooner on most clusters).
+- Memory up after a kill: retry with `memory × factor`, up to a maximum.
+- Wall time from task durations: size `time` for about K tasks per worker,
+  between a minimum and a maximum (short jobs backfill better); maybe aim
+  just under a queue's limit.
+- `time_fraction = "auto"`: `JUG_MAX_SECONDS = time − p99(task time) ×
+  safety`, instead of a fixed fraction (the GOALS.md open question).
+- CPU efficiency: `cput / (walltime × ncpus)` per class; warn (or lower
+  `cpus`) when tasks use far fewer CPUs than requested. Never raise it
+  automatically (tasks must thread themselves).
+- Startup overhead (job start to first task: setup, jugfile load): when it
+  is large compared with task time, prefer fewer, longer workers.
+- Leaks: RSS at the *start* of each task rising across a worker's tasks →
+  suggest `--aggressive-unload` or shorter workers.
+- Queue wait (`stime − qtime` per job shape, PBS `estimated.start_time`,
+  `squeue --start`): weigh smaller shapes against longer waits.
+- Lookahead: submit a class's workers before its tasks are ready when the
+  predicted time until they are (from the dependency indices in
+  `jugstate`) is about the queue wait.
+- Cancel queued workers no longer needed (ready tasks fell below queued
+  workers); needs no measurement, and cancelling from the poll already exists
+  (milestone 4 step 7, `PollResult.cancelled`).
+- Tail: when few tasks are left, submit workers with `time` for one or two
+  tasks. (No speculative execution: Jug's locks forbid running a task twice.)
+- Stats across runs, per task name, in `.jug_hpc/`, so a rerun after
+  `invalidate` starts with priors (weight recent runs more: code changes).
+- Report uneven classes (bimodal or wide durations or memory; suggest one
+  class per task name when a class covers several).
+- Budget: `max_core_hours` per project or class; the submitter stops at it,
+  `status` shows what was spent.
+
+API sketch:
+
+```toml
+[default.adapt]                 # inherited from [default] like any field
+mode = "suggest"                # "off" | "suggest" (log, status) | "auto"
+
+[class.align]
+match   = "align_*"
+memory  = "16G"                 # the starting value, as now
+time    = "4:00:00"
+workers = 128                   # still the hard cap
+
+[class.align.adapt]
+mode           = "auto"
+pilot          = 8              # workers before there is an estimate
+memory         = { fit = 0.95, headroom = 1.3, min = "2G", max = "128G", after = 20 }
+memory_on_kill = { factor = 2, max = "128G" }
+time           = { tasks_per_worker = 50, min = "30:00", max = "24:00:00" }
+time_fraction  = "auto"
+```
+
+- Plain keys keep their meaning (the starting value); adaptation lives in a
+  subtable, so validation, provenance in `jug-hpc config` and inheritance
+  are unchanged, and deleting the table turns it off.
+- Values use the unit strings of `units.py` (`"2G"`, not `min_gb`).
+- Reacting to kills (`memory_on_kill`) is separate from fitting to
+  measurements (`memory`): different triggers, different risks.
+- `adapt` must become a reserved subtable name (as `submitter` is a reserved
+  class name), as subtables are otherwise scheduler raw options.
+- `jug-hpc suggest`: prints a TOML diff for `jug_hpc.toml`, with reasons.
+
+Phase A, record:
+
+- Per worker, from the scheduler: a `usage` field on `JobOutcome`
+  (`walltime`, `cput`, `mem_peak`, `queue_wait`). PBS already returns
+  `resources_used` (`mem`, `cput`, `walltime`, `cpupercent`) and
+  `qtime`/`stime` in the `qstat -x` call `outcome()` makes; SLURM: `sacct`;
+  local: `os.wait4` rusage (so end-to-end tests cover it). Usage per array
+  element, not combined like outcomes.
+- Per task: needs Jug's `execute.task-pre-execute`/`task-executed1` hooks,
+  which the jugfile must not register (principle 1). Either (a) a Jug
+  option, `jug execute --task-log FILE` (preferred: the script stays a plain
+  `jug execute`), or (b) a launcher (`python -m jug_hpc.probe execute ...`)
+  that registers the hooks and calls Jug's main, as fallback for older Jug
+  (as `selection.py` does for `--exclude-name`).
+- One append-only JSON-lines file per worker (`.jug_hpc/usage/<jobid>.jsonl`,
+  no locking): a `start` line (hash, name, time, RSS) *before* each task, an
+  `end` line (duration, peak) after it. The last unmatched `start` of a
+  killed worker is the task that was running: the culprit of an OOM kill,
+  and the lock it left behind. This ties locks to jobs, which milestone 4
+  step 5 could not (Jug lock files hold no job ID), so stale locks could be
+  found per dead job, not only per class without workers.
+- Per-task memory peak: `ru_maxrss` only grows; on Linux, writing `5` to
+  `/proc/self/clear_refs` before each task resets `VmHWM`. The cgroup peak
+  (what the scheduler enforces) from the per-worker usage stays the
+  deciding number.
+
+Phase B, suggest:
+
+- `estimate.py` (pure): records → per class and per name: n, median, p95,
+  max of duration and memory, startup overhead, throughput. Explicit
+  small-sample rules (below `after` samples: max × headroom, or nothing).
+  Property tests with hypothesis.
+- A column in `status`, warnings in the submitter's log (e.g. task time
+  longer than the `time_fraction` margin), and `jug-hpc suggest`.
+
+Phase C, act:
+
+- `adapt.py` (pure): `(ClassSettings, Estimates, AdaptConfig) → (WorkerSpec,
+  reasons)`, called from `submit.prepare_class`, so the kept script shows
+  the values used and each change is logged with its reason.
+- Hysteresis: round to steps (memory ~1.25×, time 15 min) and change only
+  when the estimate moves past a threshold, so scripts and logs stay stable.
+- Record each job's requested spec in `jobs.json`: `kills.suggestion`
+  compares against the class as configured *now*, which is wrong once sizes
+  change by themselves.
+- Retry after a kill needs the killed task's lock released. Milestone 4
+  step 5 only releases by hand (`status --release-stale`), as the submitter
+  can't tell a dead worker's lock from a `jug execute` outside jug-hpc; the
+  per-task log names the exact lock a killed job held, so the submitter
+  could release just that one (`jugstate.release_locks`). With
+  `file_keepalive`, the lock becomes *failed* after 30 minutes and the run
+  ends `BLOCKED`: retry must release it before then, or clear the failure.
+- `MAX_FAILED_JOBS`: a memory kill moves the class up a size instead of
+  counting as a failure, until `max`; then the current rule applies.
+- Escalation is class-wide: giving only the killed task a bigger worker
+  needs Jug to select tasks by hash (e.g. `jug execute --hashes FILE`);
+  `--name`/`--pattern` match names only. Another candidate Jug change.
+- Tests: a jugfile whose tasks allocate X MB and sleep T s; the local
+  backend reporting rusage; `fake_pbs/qstat` writing `resources_used`
+  (format as in `tests/pbs_output/pbspro-2026.1/`).
 
 ## Answers to the open questions in GOALS.md
 
@@ -507,7 +644,8 @@ exceeds its wall time produces a correct per-class report on PBS. →
 | Classes for tasks after `barrier()` | Classes are name patterns, and the submitter reloads the jugfile on each poll, so new tasks are classified when they appear; covered by a test in milestone 3 |
 | Resources by input size | Out of scope for 1.0. Users can split such tasks into two `TaskGenerator`s with different names; documented in the FAQ |
 | Shared home directories | Named profiles, after 1.0 |
-| Learning task durations | Warnings only, after 1.0 |
+| Learning task durations | After 1.0: record and warn first, then suggest, then (opt-in) adapt; see "Smart limits" |
+| Per-task measurements; rerunning one task | Preferably a Jug option (`jug execute --task-log`), with a jug_hpc launcher as fallback for older Jug; selecting tasks by hash is another candidate Jug change; see "Smart limits" |
 
 ## Risks
 

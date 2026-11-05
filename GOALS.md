@@ -220,12 +220,42 @@ This choice shapes the rest of the design and must be made first.
 - **Failure handling**: when the scheduler kills a job for exceeding its
   memory or time limit, it uses SIGKILL and Jug's locks are left behind. At a
   minimum: recommend the `file_keepalive` backend, detect stale locks, and
-  report jobs killed by the scheduler, broken down by class. Possibly:
-  automatic retry with more resources.
+  report jobs killed by the scheduler, broken down by class. Later:
+  automatic retry with more resources (see "Smart limits" below).
 - **Dry run**: `--dry-run` prints every script and submission command without
   submitting anything.
 - **Logs**: one log file per worker, in a predictable location, named after
   the class and job ID.
+
+## Eventual goal: smart limits
+
+Resources in `jug_hpc.toml` are guesses. When a class has many tasks, the
+first ones show what the rest need, so `jug_hpc` could use them to size the
+later workers, for example:
+
+- submit a small batch of workers first, and more once the time per task is
+  known;
+- lower `memory` to what the tasks actually use, or raise it after a
+  memory kill and run the killed task again;
+- size `time` (and `JUG_MAX_SECONDS`) from task durations instead of a fixed
+  `time_fraction`;
+- warn about classes that use far fewer CPUs than they request.
+
+The principles apply to it as to the rest:
+
+- **Opt-in and bounded.** The values in `jug_hpc.toml` stay the starting
+  point; adaptation is configured per class (in TOML, as everything else),
+  with lower and upper bounds, and can be turned off.
+- **Explained.** Every change is logged with its reason, shown by
+  `jug-hpc status`, and visible in the scripts kept for each job. A
+  *suggest* mode (report what would change, as a diff of `jug_hpc.toml`)
+  comes before any automatic one.
+- **No change to the jugfile.** Measurements come from the scheduler (memory,
+  CPU time and wall time of each job) and from `jug execute` itself (time and
+  memory of each task), never from code added to the jugfile.
+
+PLAN.md ("Smart limits") has the ideas, an API sketch and the order of the
+work.
 
 ## Open questions
 
@@ -242,6 +272,12 @@ This choice shapes the rest of the design and must be made first.
 - `time_fraction` is a fixed safety margin. Should `jug_hpc` also learn task
   durations, e.g. by recording how long each class's tasks take, and warn when
   a class's typical task is longer than the margin `(1 - time_fraction) × time`?
+  (Yes, as the first step towards smart limits, above.)
+- Smart limits need the time and memory of each task, which only the worker
+  sees. Should that be an option of `jug execute` (a change in Jug) or a
+  wrapper of jug_hpc's around it? And rerunning only the task that was killed
+  in a bigger worker needs `jug execute` to select tasks by hash, not only by
+  name.
 
 ## Non-goals
 
@@ -257,6 +293,10 @@ This choice shapes the rest of the design and must be made first.
 - Nextflow process `label`s: the closest model for attaching resources to
   types of task.
 - Snakemake cluster profiles, dask-jobqueue, submitit.
+- Retry with more resources: Nextflow's `errorStrategy 'retry'` with
+  resources computed from `task.attempt`, and Snakemake's resources as
+  functions of `attempt`. Both need code in the workflow; `jug_hpc` would do
+  it from configuration.
 
 ## Success criteria
 
