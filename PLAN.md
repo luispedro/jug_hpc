@@ -358,11 +358,9 @@ CPUs of the worker that ran them).
      rule). Fine for a task that never fits, but maybe count only jobs that
      ran no task (would need per-job task counts; not done). Decided
      (2026-11-05): keep the rule as it is for now.
-5. Stale locks: when a job is known to be dead, find the locks its tasks left
-   behind. Report them, and offer `jug-hpc status --release-stale` (wrapping
-   Jug's lock removal) rather than removing them silently. Recommend the
-   `file_keepalive` backend in the docs and in `check`. Reporting done in
-   `status` (`status._lock_warnings`). Decisions:
+5. Done (except in the submitter's log and `check`): stale locks. Reported
+   by `status` (`status.stale_lock_classes`), removed by `jug-hpc status
+   --release-stale`. Decisions:
    - Jug lock files hold `PID ... on HOSTNAME ...` but no job ID, so locks
      are not tied to jobs. Instead: a class whose tasks are locked (Jug's
      `running` count) while no worker of the class is queued or running
@@ -382,13 +380,20 @@ CPUs of the worker that ran them).
      after 30 minutes (`is_failed`: mtime older than 30 min), so the run
      ends `BLOCKED` (and `jug cleanup --failed-only` frees it); before
      that, `status` reports it as here.
-   - Left: `--release-stale`. Jug has no CLI to remove one task's lock
-     (`jug cleanup --locks-only` removes all, failed ones included), so it
-     needs a `jugstate` subprocess command that loads the jugfile and, for
-     the tasks of the given names, calls `store.getlock(hash).release()`
-     when `is_locked()` and not `is_failed()`. Order to avoid releasing a
-     live lock: count (list the locks), then query the scheduler again, and
-     release only in classes that still have no queued or running worker.
+   - `--release-stale`: Jug has no CLI to remove one task's lock (`jug
+     cleanup --locks-only` removes all, failed ones included). The counts
+     subprocess now also lists the hashes of the `running` tasks per name
+     (`SubprocessCounts.locked`, JSON format 2). Then the CLI rereads
+     `jobs.json`, queries the scheduler again (`classes_to_release`), and
+     releases in-process (`jugstate.release_locks`: the store from
+     `jug.backends.select`, no jugfile loading, so the window after the
+     query is milliseconds) the locks still locked and not failed, in the
+     classes still without queued/running workers. A worker that held a
+     lock at count time was recorded before it, so the second query sees
+     it. Then a second count gives the table. Released locks go to stdout
+     (`[class.x]: released the locks of N tasks`), a class that got a
+     worker meanwhile is a note. No confirmation prompt; a `jug execute`
+     outside jug-hpc loses its locks too (documented).
 6. Warn in `check` when the jugdir backend can't detect dead workers (plain
    directory, redis) and recommend `file_keepalive:`; decide, with step 5,
    whether it is a note instead, as it would show for most projects.

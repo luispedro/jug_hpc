@@ -15,7 +15,9 @@ from jug_hpc.jugstate import (
     default_jugdir,
     load_jugfile,
     load_project,
+    project_release_locks,
     project_task_counts,
+    release_locks,
     subprocess_task_counts,
     task_counts,
 )
@@ -392,6 +394,44 @@ def test_subprocess_task_counts(project):
     assert all(c.done for c in subprocess_task_counts('simple.py', cwd=project).counts.values())
 
 
+def test_subprocess_locked_and_release(project):
+    state = load_jugfile('simple.py', cwd=project)
+    loads = [t for t in state.tasks if t.name == 'simple.load']
+    hashes = [t.hash().decode() for t in loads]
+    state.store.getlock(loads[0].hash()).get()
+    state.store.getlock(loads[2].hash()).get()
+    state.store.getlock(loads[1].hash()).get()
+    state.store.getlock(loads[1].hash()).fail()
+    result = subprocess_task_counts('simple.py', cwd=project)
+    assert result.counts['simple.load'] == TaskCounts(running=2, failed=1)
+    # in definition order; failed tasks are not listed
+    assert result.locked == {'simple.load': (hashes[0], hashes[2])}
+
+    # the lock of [2] is gone (its worker ended) before the release
+    state.store.getlock(loads[2].hash()).release()
+    assert release_locks('simple.py', None, [*result.locked['simple.load'], hashes[1]],
+                         cwd=project) == (hashes[0],)
+    assert task_counts(state)['simple.load'] == TaskCounts(ready=2, failed=1)
+    with pytest.raises(ValueError, match='not a task hash'):
+        release_locks('simple.py', None, ['../x'], cwd=project)
+
+
+def test_project_release_locks(project):
+    (project / 'jug_hpc.toml').write_text(
+        'jugfile = "simple.py"\njugdir = "file_keepalive:store"\n'
+        '[default]\nmemory = "1G"\ntime = "1:00:00"\n')
+    settings = load_project_settings(project)
+    state = load_project(settings)
+    [load, *_] = state.tasks
+    lock = state.store.getlock(load.hash())
+    assert super(type(lock), lock).get()      # no keepalive monitor process
+    assert (project / 'store' / 'locks').is_dir()
+    counted = project_task_counts(settings)
+    assert project_release_locks(settings, counted.locked['simple.load']) == (
+        load.hash().decode(),)
+    assert not lock.is_locked()
+
+
 def test_subprocess_task_counts_barrier(project):
     result = subprocess_task_counts('barrier.py', cwd=project)
     assert result.hit_barrier
@@ -499,14 +539,16 @@ def test_project_task_counts(project):
 
 def test_subprocess_command(tmp_path):
     runner = FakeRunner().on(sys.executable, stdout=json.dumps(
-        {'format': 1, 'hit_barrier': True,
+        {'format': 2, 'hit_barrier': True,
          'counts': [['j.f', {'waiting': 1, 'ready': 2, 'running': 3, 'failed': 4,
-                             'finished': 5}]]}), stderr='log\n')
+                             'finished': 5}]],
+         'locked': [['j.f', ['ab12', 'cd34', '5678']]]}), stderr='log\n')
     result = subprocess_task_counts('j.py', 'redis://host', cwd=tmp_path, runner=runner,
                                     timeout=30)
     assert result.counts == {'j.f': TaskCounts(1, 2, 3, 4, 5)}
     assert result.hit_barrier
     assert result.output == 'log\n'
+    assert result.locked == {'j.f': ('ab12', 'cd34', '5678')}
     [call] = runner.calls
     assert call.argv == (sys.executable, '-P', '-m', 'jug_hpc.jugstate', 'counts',
                          '--jugdir=redis://host', str(tmp_path / 'j.py'))
@@ -515,19 +557,29 @@ def test_subprocess_command(tmp_path):
     assert runner.calls[1].argv[-2:] == ('counts', str(tmp_path / 'j.py'))
 
 
+_COUNTS_F = ('{"format": 2, "hit_barrier": false, "counts": [["f", {"waiting": 0, '
+             '"ready": 1, "running": 0, "failed": 0, "finished": 0}]]')
+
+
 @pytest.mark.parametrize('stdout', [
     '',
     'not json',
     '[]',
-    '{"format": 2, "hit_barrier": false, "counts": []}',
-    '{"format": 1, "counts": []}',
-    '{"format": 1, "hit_barrier": 0, "counts": []}',
-    '{"format": 1, "hit_barrier": false, "counts": [["f", {"ready": 1}]]}',
-    '{"format": 1, "hit_barrier": false, "counts": [["f"]]}',
-    ('{"format": 1, "hit_barrier": false, "counts": [[1, {"waiting": 0, "ready": 1, '
+    '{"format": 1, "hit_barrier": false, "counts": [], "locked": []}',
+    '{"format": 2, "counts": []}',
+    '{"format": 2, "hit_barrier": 0, "counts": []}',
+    '{"format": 2, "hit_barrier": false, "counts": [["f", {"ready": 1}]]}',
+    '{"format": 2, "hit_barrier": false, "counts": [["f"]]}',
+    ('{"format": 2, "hit_barrier": false, "counts": [[1, {"waiting": 0, "ready": 1, '
     '"running": 0, "failed": 0, "finished": 0}]]}'),
-    ('{"format": 1, "hit_barrier": false, "counts": [["f", {"waiting": 0, "ready": 1.5, '
+    ('{"format": 2, "hit_barrier": false, "counts": [["f", {"waiting": 0, "ready": 1.5, '
     '"running": 0, "failed": 0, "finished": 0}]]}'),
+    _COUNTS_F + '}',
+    _COUNTS_F + ', "locked": [["g", ["ab"]]]}',
+    _COUNTS_F + ', "locked": [["f", []]]}',
+    _COUNTS_F + ', "locked": [["f", ["../x"]]]}',
+    _COUNTS_F + ', "locked": [["f", [12]]]}',
+    _COUNTS_F + ', "locked": [["f"]]}',
 ])
 def test_subprocess_unexpected_output(tmp_path, stdout):
     runner = FakeRunner().on(sys.executable, stdout=stdout, stderr='oops')
@@ -538,7 +590,7 @@ def test_subprocess_unexpected_output(tmp_path, stdout):
 
 def test_subprocess_reported_error_wins_over_exit_status(tmp_path):
     runner = FakeRunner().on(sys.executable, returncode=1, stdout=json.dumps(
-        {'format': 1, 'error': 'j.py: broken', 'details': 'Traceback ...'}))
+        {'format': 2, 'error': 'j.py: broken', 'details': 'Traceback ...'}))
     with pytest.raises(JugfileError, match='^j.py: broken$') as e:
         subprocess_task_counts('j.py', cwd=tmp_path, runner=runner)
     assert e.value.details == 'Traceback ...'
@@ -561,6 +613,7 @@ def test_main_in_process(project, capfd, monkeypatch):
     assert _main(['counts', 'simple.py']) == 0
     out, _ = capfd.readouterr()
     data = json.loads(out)
-    assert data['format'] == 1
+    assert data['format'] == 2
+    assert data['locked'] == []
     assert [name for name, _ in data['counts']] == [
         'simple.load', 'simple.align_sample', 'simple.merge']

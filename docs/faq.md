@@ -18,7 +18,9 @@ It stores results exactly like the default directory backend, so you can
 switch an existing project to it. The difference is how it handles dead
 workers. When the scheduler kills a worker (for exceeding its memory or wall
 time), the task it was running keeps its lock. With the default backend, Jug
-counts that task as running until you remove the lock. With `file_keepalive`,
+counts that task as running until you remove the lock (`jug-hpc status` warns
+about such locks, and `jug-hpc status --release-stale` removes them). With
+`file_keepalive`,
 a lock that hasn't been refreshed for 30 minutes counts as failed. `jug
 cleanup --failed-only` then removes it, so the task can run again. See Jug's
 [backends documentation](https://jug.readthedocs.io/en/latest/backends.html).

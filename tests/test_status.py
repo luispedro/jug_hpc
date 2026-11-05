@@ -3,11 +3,19 @@ from pathlib import Path
 
 import pytest
 
+from jug_hpc.classes import Classifier
 from jug_hpc.config import load_project_settings
 from jug_hpc.jugstate import TaskCounts
 from jug_hpc.schedulers import JobId, JobOutcome, JobState, JobStatus, Outcome
 from jug_hpc.state import JobRecord
-from jug_hpc.status import WorkerCounts, status, worker_counts
+from jug_hpc.status import (
+    WorkerCounts,
+    classes_to_release,
+    locks_to_release,
+    release_messages,
+    status,
+    worker_counts,
+)
 from jug_hpc.submitter import SUBMIT_GRACE
 
 NOW = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
@@ -178,11 +186,13 @@ def test_status_stale_locks(project):
         ("[class.big]: 2 tasks are locked, but no worker of the class is queued or running: "
          "unless a 'jug execute' started outside jug-hpc is running them, the workers that "
          'locked them died (e.g., killed by the scheduler) and left their locks behind, so '
-         'no worker will run them and the submitter will not finish'),
+         'no worker will run them and the submitter will not finish (remove the locks '
+         "with 'jug-hpc status --release-stale')"),
         ("[default]: 1 task is locked, but no worker of the class is queued or running: "
          "unless a 'jug execute' started outside jug-hpc is running it, the worker that "
          'locked it died (e.g., killed by the scheduler) and left its lock behind, so no '
-         'worker will run it and the submitter will not finish'),
+         'worker will run it and the submitter will not finish (remove the lock '
+         "with 'jug-hpc status --release-stale')"),
     ]
 
     # a queued worker (or one just submitted) may have started since it was queried
@@ -194,3 +204,43 @@ def test_status_stale_locks(project):
     more = [*records, record('5', 'old')]
     running = {**statuses, '5': JobStatus(JobState.RUNNING, running=1)}
     assert len(warnings(more, running)) == 1
+
+
+def test_stale_locks_to_release(project):
+    by_class = {'big': TaskCounts(running=2), 'default': TaskCounts(running=1)}
+    records = [record('1', 'big'), record('2')]
+    report = status(project, by_class, False, records, {'1': FINISHED, '2': FINISHED}, {},
+                    NOW, scheduler_name='pbs')
+    assert report.stale == ('big', 'default')
+
+    # asked again: a worker of the default class was submitted meanwhile
+    records.append(record('3', submitted=NOW))
+    statuses = {'1': FINISHED, '2': FINISHED, '3': UNKNOWN}
+    assert classes_to_release(report.stale, records, statuses, NOW,
+                              scheduler_name='pbs') == ('big',)
+    # ... but not with this backend; the submitter job does not count
+    records[-1] = record('3', scheduler='local')
+    records.append(record('4', 'submitter'))
+    statuses = {'1': FINISHED, '2': FINISHED, '4': JobStatus(JobState.RUNNING, running=1)}
+    assert classes_to_release(report.stale, records, statuses, NOW,
+                              scheduler_name='pbs') == ('big', 'default')
+
+    classifier = Classifier.from_project(project)
+    locked = {'a.big': ('a1', 'a2'), 'small': ('b1',), 'b.big': ('c1',)}
+    assert locks_to_release(classifier, locked, ['big']) == {'big': ('a1', 'a2', 'c1')}
+    assert locks_to_release(classifier, locked, ['default', 'big']) == {
+        'default': ('b1',), 'big': ('a1', 'a2', 'c1')}
+    assert locks_to_release(classifier, {}, ['big']) == {}
+
+    lines, notes = release_messages(('big', 'default'), {'big': ('a1', 'a2')})
+    assert lines == ['[class.big]: released the locks of 2 tasks']
+    assert notes == [('[default]: locks not released, as a worker of the class is queued '
+                      'or running now')]
+    lines, _ = release_messages(('default',), {'default': ('a1',)})
+    assert lines == ['[default]: released the locks of 1 task']
+
+    # no stale classes while a class no longer in jug_hpc.toml has workers
+    statuses['5'] = JobStatus(JobState.RUNNING, running=1)
+    records.append(record('5', 'old'))
+    assert status(project, by_class, False, records, statuses, {}, NOW,
+                  scheduler_name='pbs').stale == ()

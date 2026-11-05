@@ -16,7 +16,12 @@ is not in the jugfile). This is why the submitter, which reloads the jugfile
 on every poll, loads it in a subprocess, with :func:`subprocess_task_counts`
 (or :func:`project_task_counts`). That runs ``python -m jug_hpc.jugstate
 counts``, which loads the jugfile, counts its tasks and prints the counts as
-JSON (see :func:`_main` for the format).
+JSON (see :func:`_main` for the format), and the hashes of the locked tasks.
+
+:func:`release_locks` removes the locks of given tasks (by hash) when they
+are still locked and not failed; it opens the jugdir without loading the
+jugfile, so it takes little time (``jug-hpc status --release-stale`` asks the
+scheduler about the workers just before calling it).
 
 :func:`task_counts` counts the tasks of a loaded jugfile in each state
 (waiting, ready, running, failed, finished) with the function behind ``jug
@@ -28,6 +33,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import sys
 import traceback
 import warnings
@@ -43,13 +49,15 @@ __all__ = [
     'default_jugdir',
     'load_jugfile',
     'load_project',
+    'project_release_locks',
     'project_task_counts',
+    'release_locks',
     'subprocess_task_counts',
     'task_counts',
 ]
 
 #: Version of the JSON printed by ``python -m jug_hpc.jugstate counts``
-_COUNTS_FORMAT = 1
+_COUNTS_FORMAT = 2
 _MODULE = 'jug_hpc.jugstate'
 
 #: The states of a task, as ``jug status`` names them, in dependency order
@@ -167,10 +175,15 @@ class SubprocessCounts:
     output : str
         What the subprocess wrote while loading the jugfile (the jugfile's
         own output to stdout and stderr, Jug's log messages); usually empty
+    locked : dict
+        Task name -> tuple of the hashes (str) of its ``running`` tasks (those
+        locked and not failed), for the names that have any; see
+        :func:`release_locks`
     '''
     counts: dict
     hit_barrier: bool = False
     output: str = ''
+    locked: dict = field(default_factory=dict)
 
 
 def default_jugdir(jugfile):
@@ -280,17 +293,84 @@ def task_counts(state):
         If the dependency graph could not be built while loading (see
         ``JugState.graph_error``)
     '''
-    from jug.subcommands.status import unknown, update_status
+    return _counts_and_locks(state)[0]
+
+
+def _counts_and_locks(state):
+    ''':func:`task_counts`, and the hashes of the ``running`` tasks by name'''
+    from jug.subcommands.status import running, unknown, update_status
     if state.graph_error is not None:
         raise JugfileError(state.graph_error)
     ht = [(i, t.name, h, unknown)
           for i, (t, h) in enumerate(zip(state.tasks, state.hashes, strict=True))]
     deps = dict(enumerate(state.dependencies))
-    status, _ = update_status(state.store, ht, deps, {})
+    # every task starts as unknown, so the new status of each is in `changed`
+    status, changed = update_status(state.store, ht, deps, {})
     counts = {}
     for name in dict.fromkeys(state.task_names):
         counts[name] = TaskCounts(*(getattr(status, s).get(name, 0) for s in STATES))
-    return counts
+    locked = {}
+    for i, s in sorted(changed.items()):
+        if s == running:
+            locked.setdefault(state.tasks[i].name, []).append(_hash_str(state.hashes[i]))
+    return counts, {name: tuple(hashes) for name, hashes in locked.items()}
+
+
+def _hash_str(h):
+    return h.decode('ascii') if isinstance(h, bytes) else str(h)
+
+
+#: What a task hash looks like (Jug's are hex digests)
+_HASH_RE = re.compile(r'[0-9a-f]+')
+
+
+def project_release_locks(settings, hashes):
+    ''':func:`release_locks` for a project (a ``ProjectSettings``)'''
+    return release_locks(settings.jugfile, settings.jugdir, hashes, cwd=settings.project_dir)
+
+
+def release_locks(jugfile, jugdir, hashes, cwd=None):
+    '''Remove the locks of the tasks ``hashes`` that are locked and not failed
+
+    The jugfile is not loaded: the store is opened from the jugdir (as
+    ``jug.init`` would open it), so this is quick. A lock that was removed or
+    marked as failed since the hashes were listed is left alone.
+
+    Parameters
+    ----------
+    jugfile, jugdir, cwd
+        As for :func:`load_jugfile` (the jugfile only gives the default
+        jugdir)
+    hashes : iterable of str
+        Task hashes, as in ``SubprocessCounts.locked``
+
+    Returns
+    -------
+    released : tuple of str
+        The hashes whose lock was removed, in the order given
+    '''
+    from jug.backends import select
+    cwd = Path.cwd() if cwd is None else Path(cwd).absolute()
+    if jugdir is None:
+        jugdir = default_jugdir(cwd / jugfile)
+    elif isinstance(jugdir, Path):
+        jugdir = str(cwd / jugdir)
+    hashes = list(hashes)
+    for h in hashes:
+        if not (isinstance(h, str) and _HASH_RE.fullmatch(h)):
+            raise ValueError(f'not a task hash: {h!r}')
+    released = []
+    with contextlib.chdir(cwd):
+        store = select(jugdir)
+        try:
+            for h in hashes:
+                lock = store.getlock(h)
+                if lock.is_locked() and not lock.is_failed():
+                    lock.release()
+                    released.append(h)
+        finally:
+            store.close()
+    return tuple(released)
 
 
 def project_task_counts(settings, *, runner=None, timeout=None):
@@ -405,9 +485,15 @@ def _parse_counts_output(jugfile, returncode, stdout, stderr):
         hit_barrier = data['hit_barrier']
         if type(hit_barrier) is not bool:
             raise ValueError(hit_barrier)
+        locked = {}
+        for name, hashes in data['locked']:
+            if name not in counts or not hashes or not all(
+                    isinstance(h, str) and _HASH_RE.fullmatch(h) for h in hashes):
+                raise ValueError(name)
+            locked[name] = tuple(hashes)
     except (KeyError, TypeError, ValueError):
         raise failed('unexpected output') from None
-    return SubprocessCounts(counts, hit_barrier, stderr)
+    return SubprocessCounts(counts, hit_barrier, stderr, locked)
 
 
 def _dependency_graph(tasks, jugfile):
@@ -511,14 +597,16 @@ def _main(argv=None):
     Loads the jugfile (from the current directory) and prints one JSON
     object to stdout. On success (exit status 0)::
 
-        {"format": 1, "hit_barrier": false,
-         "counts": [["jugfile.f", {"waiting": 0, "ready": 2, ...}], ...]}
+        {"format": 2, "hit_barrier": false,
+         "counts": [["jugfile.f", {"waiting": 0, "ready": 2, ...}], ...],
+         "locked": [["jugfile.f", ["<hash>", ...]], ...]}
 
     with one ``[name, counts]`` pair per task name, in the order the names
-    first appear. If the jugfile cannot be loaded or its tasks counted (exit
-    status 1)::
+    first appear, and one ``[name, hashes]`` pair per task name with
+    ``running`` tasks (locked, not failed). If the jugfile cannot be loaded or
+    its tasks counted (exit status 1)::
 
-        {"format": 1, "error": "<message>", "details": "<traceback>"}
+        {"format": 2, "error": "<message>", "details": "<traceback>"}
 
     Anything the jugfile writes to stdout goes to stderr instead, so that
     stdout holds only the JSON.
@@ -536,7 +624,7 @@ def _main(argv=None):
     with _stdout_to_stderr():
         try:
             state = load_jugfile(args.jugfile, args.jugdir)
-            counts = task_counts(state)
+            counts, locked = _counts_and_locks(state)
         except JugfileError as e:
             result = {'format': _COUNTS_FORMAT, 'error': str(e), 'details': e.details}
             status = 1
@@ -546,6 +634,7 @@ def _main(argv=None):
                 'hit_barrier': state.hit_barrier,
                 'counts': [[name, {s: getattr(c, s) for s in STATES}]
                            for name, c in counts.items()],
+                'locked': [[name, list(hashes)] for name, hashes in locked.items()],
             }
             status = 0
     json.dump(result, sys.stdout)

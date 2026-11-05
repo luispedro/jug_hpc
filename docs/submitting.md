@@ -275,10 +275,33 @@ after a worker was killed in the middle of a task:
 
 ```
 jug-hpc: warning: [default]: 1 job killed by a signal (the last: job 1: killed by SIGKILL); if it used more memory than requested, raise memory (now 1G)
-jug-hpc: warning: [default]: 1 task is locked, but no worker of the class is queued or running: unless a 'jug execute' started outside jug-hpc is running it, the worker that locked it died (e.g., killed by the scheduler) and left its lock behind, so no worker will run it and the submitter will not finish
+jug-hpc: warning: [default]: 1 task is locked, but no worker of the class is queued or running: unless a 'jug execute' started outside jug-hpc is running it, the worker that locked it died (e.g., killed by the scheduler) and left its lock behind, so no worker will run it and the submitter will not finish (remove the lock with 'jug-hpc status --release-stale')
 ```
 
-See the limitations below for how to remove such locks.
+`jug-hpc status --release-stale` removes these locks, so that the tasks are
+ready again. It asks the scheduler about the jobs again just before, and
+leaves alone the locks of a class that has a worker queued or running by
+then. It also removes the locks of a `jug execute` started outside jug-hpc,
+so don't use it while one runs. The table is that of a second count, after
+the locks were removed:
+
+```
+$ jug-hpc status --release-stale
+[default]: released the locks of 1 task
+                                  tasks                        workers
+class           waiting  ready  running  failed  finished  queued  running
+[class.middle]        0      0        0       0         0       0        0
+[default]             0      1        0       0         0       0        0
+total                 0      1        0       0         0       0        0
+
+Submitter: not running
+jug-hpc: warning: [default]: 1 job killed by a signal (the last: job 1: killed by SIGKILL); if it used more memory than requested, raise memory (now 1G)
+jug-hpc: note: tasks are ready, but no worker is queued or running and no submitter is running: run 'jug-hpc submit'
+```
+
+A submitter that is running submits workers for these tasks at its next
+poll. Fix the cause first (here, raise `memory`), or the next worker will be
+killed too.
 
 Notes say when every task is finished, when no task can run because some
 failed, and when tasks are ready but no worker is queued or running and no
@@ -429,13 +452,13 @@ project's jobs.
 
 jug_hpc is in early development. In particular:
 
-- Locks left behind are reported by `jug-hpc status`, but not removed. A
-  worker killed with `SIGKILL` (for example for exceeding its memory) leaves
-  its task's lock behind (one killed with `SIGTERM`, as for wall time, usually
-  releases it). With a plain jugdir, Jug then counts the task as running
-  forever, so the submitter never finishes (`jug cleanup --locks-only` removes
-  such locks, but only do this when no worker is running). Use the `file_keepalive:` jugdir backend
-  instead: there, a lock that is not refreshed for 30 minutes counts as
-  failed (see the {doc}`faq`).
+- Locks left behind are not removed by the submitter. A worker killed with
+  `SIGKILL` (for example for exceeding its memory) leaves its task's lock
+  behind (one killed with `SIGTERM`, as for wall time, usually releases it).
+  With a plain jugdir, Jug then counts the task as running forever, so the
+  submitter never finishes and its log does not say why: `jug-hpc status`
+  reports such locks, and `jug-hpc status --release-stale` removes them. With
+  the `file_keepalive:` jugdir backend, a lock that is not refreshed for 30
+  minutes counts as failed instead, so the run ends (see the {doc}`faq`).
 - The submitter loads the jugfile at every poll. For jugfiles with millions of
   tasks, use a longer `--interval` and `--max-interval`.

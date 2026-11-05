@@ -30,6 +30,13 @@ counted, so the locks were seen after the workers; a lock taken in between
 jug-hpc) is reported as well, which the warning says. Nothing is reported
 while a class no longer in ``jug_hpc.toml`` has workers queued or running,
 as their tasks are counted in the classes that match them now.
+
+``jug-hpc status --release-stale`` removes those locks: the CLI reads
+``jobs.json`` and asks the scheduler again, and releases (with
+:func:`jug_hpc.jugstate.release_locks`) the locks listed by the count in the
+classes of :attr:`StatusReport.stale` that still have no worker queued or
+running (:func:`classes_to_release`, :func:`locks_to_release`). A worker that
+locked a task before the count was recorded before it, so it is seen then.
 '''
 from dataclasses import dataclass, field
 
@@ -42,6 +49,10 @@ from .submitter import SUBMIT_GRACE, Progress, active_submitter_jobs, progress
 __all__ = [
     'StatusReport',
     'WorkerCounts',
+    'classes_to_release',
+    'locks_to_release',
+    'release_messages',
+    'stale_lock_classes',
     'status',
     'worker_counts',
 ]
@@ -112,10 +123,14 @@ class StatusReport:
     notes : list of str
         Informational: the run is over, tasks are ready with nobody to run
         them, jobs of another backend were not asked about, ...
+    stale : tuple of str
+        The classes warned about for locked tasks without workers (see
+        :func:`stale_lock_classes`)
     '''
     text: str
     warnings: list = field(default_factory=list)
     notes: list = field(default_factory=list)
+    stale: tuple = ()
 
 
 def status(project, by_class, hit_barrier, records, statuses, outcomes, now, *,
@@ -205,9 +220,108 @@ def status(project, by_class, hit_barrier, records, statuses, outcomes, now, *,
 
     ended = [(r, outcomes[r.job_id]) for r in workers_jobs if r.job_id in outcomes]
     warnings = _kill_warnings(project, scheduler_kills(ended))
-    if not unknown:
-        warnings.extend(_lock_warnings(by_class, workers))
-    return StatusReport('\n'.join(lines), warnings, notes)
+    stale = () if unknown else stale_lock_classes(by_class, workers)
+    warnings.extend(_lock_warning(name, by_class[name].running) for name in stale)
+    return StatusReport('\n'.join(lines), warnings, notes, stale)
+
+
+def stale_lock_classes(by_class, workers):
+    '''The classes with locked tasks but no worker queued or running
+
+    Parameters
+    ----------
+    by_class : dict
+        Class name -> TaskCounts
+    workers : dict
+        Class name -> :class:`WorkerCounts` (as returned by
+        :func:`worker_counts`)
+
+    Returns
+    -------
+    names : tuple of str
+        In the order of ``by_class``
+    '''
+    return tuple(name for name, tc in by_class.items()
+                 if tc.running and not workers.get(name, WorkerCounts()).active)
+
+
+def classes_to_release(stale, records, statuses, now, *, scheduler_name,
+                       grace=SUBMIT_GRACE):
+    '''The classes of ``stale`` that still have no worker queued or running
+
+    Parameters
+    ----------
+    stale : sequence of str
+        ``StatusReport.stale`` of a report made before
+    records, statuses, now, scheduler_name, grace
+        As for :func:`status`, read again after that report
+
+    Returns
+    -------
+    names : tuple of str
+        In the order of ``stale``
+    '''
+    workers = worker_counts(
+        [r for r in records if r.scheduler == scheduler_name and r.class_name != SUBMITTER],
+        statuses, now, grace=grace)
+    return tuple(n for n in stale if not workers.get(n, WorkerCounts()).active)
+
+
+def release_messages(stale, released):
+    '''What ``--release-stale`` did, for each class of ``stale``
+
+    Parameters
+    ----------
+    stale : sequence of str
+        ``StatusReport.stale`` of the report before the locks were released
+    released : dict
+        Class name -> the hashes whose lock was removed, for the classes whose
+        locks were released (others were left alone, as a worker of the class
+        was queued or running when the scheduler was asked again)
+
+    Returns
+    -------
+    lines : list of str
+        For stdout: the released locks
+    notes : list of str
+        The classes whose locks were left alone
+    '''
+    lines = []
+    notes = []
+    for name in stale:
+        if name in released:
+            n = len(released[name])
+            tasks = '1 task' if n == 1 else f'{n} tasks'
+            lines.append(f'{_label(name)}: released the locks of {tasks}')
+        else:
+            notes.append(f'{_label(name)}: locks not released, as a worker of the class is '
+                         'queued or running now')
+    return lines, notes
+
+
+def locks_to_release(classifier, locked, classes):
+    '''The locked tasks of ``classes``, by class
+
+    Parameters
+    ----------
+    classifier : Classifier
+    locked : dict
+        Task name -> hashes of its locked tasks (``SubprocessCounts.locked``)
+    classes : iterable of str
+        The classes whose locks to release
+
+    Returns
+    -------
+    hashes : dict
+        Class name -> tuple of hashes, for the classes of ``classes`` that
+        have locked tasks, in the order of ``classes``
+    '''
+    by_class = {name: [] for name in classes}
+    for task_name, hashes in locked.items():
+        c = classifier.class_of(task_name)
+        if c in by_class:
+            by_class[c].extend(hashes)
+    return {name: tuple(hashes) for name, hashes in by_class.items() if hashes}
 
 
 def _kill_warnings(project, kills):
@@ -232,23 +346,19 @@ def _kill_warnings(project, kills):
     return warnings
 
 
-def _lock_warnings(by_class, workers):
-    '''Locked tasks of classes without workers (see the module docstring)'''
-    warnings = []
-    for name, tc in by_class.items():
-        if tc.running and not workers.get(name, WorkerCounts()).active:
-            if tc.running == 1:
-                what, it, workers_that, its_locks = '1 task is', 'it', 'worker that', 'its lock'
-            else:
-                what, it, workers_that, its_locks = (f'{tc.running} tasks are', 'them',
-                                                     'workers that', 'their locks')
-            warnings.append(
-                f'{_label(name)}: {what} locked, but no worker of the class is queued or '
-                f"running: unless a 'jug execute' started outside jug-hpc is running {it}, "
-                f'the {workers_that} locked {it} died (e.g., killed by the scheduler) and '
-                f'left {its_locks} behind, so no worker will run {it} and the submitter '
-                'will not finish')
-    return warnings
+def _lock_warning(name, n):
+    '''Locked tasks of a class without workers (see the module docstring)'''
+    if n == 1:
+        what, it, workers_that, its_locks = '1 task is', 'it', 'worker that', 'its lock'
+    else:
+        what, it, workers_that, its_locks = (f'{n} tasks are', 'them', 'workers that',
+                                             'their locks')
+    locks = 'lock' if n == 1 else 'locks'
+    return (f'{_label(name)}: {what} locked, but no worker of the class is queued or '
+            f"running: unless a 'jug execute' started outside jug-hpc is running {it}, "
+            f'the {workers_that} locked {it} died (e.g., killed by the scheduler) and '
+            f'left {its_locks} behind, so no worker will run {it} and the submitter '
+            f"will not finish (remove the {locks} with 'jug-hpc status --release-stale')")
 
 
 def _submitter_line(active_jobs, statuses, lock_holder):

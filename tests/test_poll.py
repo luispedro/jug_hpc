@@ -109,8 +109,9 @@ class Counts:
         self.counts[name] = {s: counts.get(s, 0) for s in STATES}
 
     def reply(self, call):
-        return json.dumps({'format': 1, 'hit_barrier': self.hit_barrier,
-                           'counts': [[n, c] for n, c in self.counts.items()]})
+        return json.dumps({'format': 2, 'hit_barrier': self.hit_barrier,
+                           'counts': [[n, c] for n, c in self.counts.items()],
+                           'locked': []})
 
 
 @pytest.fixture
@@ -800,7 +801,7 @@ def test_run_jugfile_error_later_is_retried(setup):
     def broken(call):
         replies.append(1)
         if len(replies) == 2:
-            return (1, json.dumps({'format': 1, 'error': 'jugfile.py: SyntaxError',
+            return (1, json.dumps({'format': 2, 'error': 'jugfile.py: SyntaxError',
                                    'details': ''}), '')
         if len(replies) >= 3:
             counts.set(LOAD, finished=1)
@@ -1122,8 +1123,30 @@ def test_cli_status_stale_lock(tmp_path, monkeypatch, capsys):
         ("jug-hpc: warning: [default]: 1 task is locked, but no worker of the class is "
          "queued or running: unless a 'jug execute' started outside jug-hpc is running "
          'it, the worker that locked it died (e.g., killed by the scheduler) and left its '
-         'lock behind, so no worker will run it and the submitter will not finish'),
+         'lock behind, so no worker will run it and the submitter will not finish (remove the lock '
+         "with 'jug-hpc status --release-stale')"),
     ]
+
+    kill_warning = err.splitlines()[0]
+    status = main(['-C', str(project_dir), 'status', '--release-stale'])
+    out, err = capsys.readouterr()
+    assert status == 0, err
+    lines = out.splitlines()
+    assert lines[0] == '[default]: released the locks of 1 task'
+    # the table comes from a second count
+    assert lines[4].split() == ['[default]', '0', '1', '0', '0', '0', '0', '0']
+    assert err.splitlines() == [
+        kill_warning,
+        ("jug-hpc: note: tasks are ready, but no worker is queued or running and no "
+         "submitter is running: run 'jug-hpc submit'"),
+    ]
+
+    status = main(['-C', str(project_dir), 'status', '--release-stale'])
+    out, err = capsys.readouterr()
+    assert status == 0, err
+    assert out.splitlines()[3].split()[:3] == ['[default]', '0', '1']
+    assert ('jug-hpc: note: no task is locked in a class without workers: no lock '
+            'released') in err.splitlines()
 
 
 def test_cli_status_errors(tmp_path, monkeypatch, capsys):

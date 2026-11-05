@@ -30,7 +30,7 @@ to report jobs killed by the scheduler in the submitter's log, with what to chan
 class, the submitter, and the kills of every recorded job), and `jug-hpc cancel`
 (step 2, `cancel.py`; PBS `cancel()` with `qdel`), and the submitter cancelling the
 workers left when no task can run (step 7), and `status` warning about locks left by
-dead workers (step 5, reporting only; `--release-stale` not done).
+dead workers and `status --release-stale` removing them (step 5).
 
 ## Commands
 
@@ -98,10 +98,12 @@ paths replaced by `/home/me/rnaseq`.
   `Task.store`, `sys.modules`, `sys.path`) so it can be called repeatedly. It also computes
   task hashes and dependency indices while the jugfile module is loaded (hashing can pickle
   jugfile functions); `task_counts` feeds them to Jug's `update_status` for per-name
-  `TaskCounts` (waiting/ready/running/failed/finished). Keep Jug-internal access confined
-  here. Modules imported by the jugfile stay cached across in-process loads, so the
-  submitter must load in a subprocess: `subprocess_task_counts` runs `python -P -m
-  jug_hpc.jugstate counts` (through a `Runner`) and parses its JSON.
+  `TaskCounts` (waiting/ready/running/failed/finished). `release_locks` opens the store
+  from the jugdir (no jugfile load) to remove given locks. Keep Jug-internal access
+  confined here. Modules imported by the jugfile stay cached across in-process loads, so
+  the submitter must load in a subprocess: `subprocess_task_counts` runs `python -P -m
+  jug_hpc.jugstate counts` (through a `Runner`) and parses its JSON (versioned,
+  `_COUNTS_FORMAT`; it also lists the hashes of locked tasks per name).
 - **`selection.py`**: the `jug execute` args selecting a class's tasks. The default class
   uses `--exclude-name/--exclude-pattern` when the installed Jug supports them, otherwise a
   generated negative-lookahead `--pattern` regex that is verified against the classifier.
@@ -163,8 +165,9 @@ paths replaced by `/home/me/rnaseq`.
 - **`status.py`**: `jug-hpc status`, pure like `check.py`: `worker_counts` (queued/running
   per class, `SUBMIT_GRACE` as in `active_workers`) and `status(...)` → `StatusReport`
   (table text, kill warnings per class and kind, stale-lock warnings for classes with
-  locked tasks but no queued/running worker, notes). `cli.cmd_status` reads everything
-  (all jobs of the backend in `jobs.json`, `query` then `outcome`, task counts in a
+  locked tasks but no queued/running worker, `StatusReport.stale`, notes);
+  `classes_to_release`/`locks_to_release`/`release_messages` serve `--release-stale`.
+  `cli.cmd_status` reads everything (all jobs of the backend in `jobs.json`, `query` then `outcome`, task counts in a
   subprocess, `ProjectState.submitter_lock_holder()`) and holds no lock.
 - **`cancel.py`**: `jug-hpc cancel`. `cancel(scheduler, project_state, ...)` cancels the
   active jobs (`submitter.active_jobs`): a submitter job first, then waits (`CANCEL_WAIT`)

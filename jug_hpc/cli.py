@@ -56,7 +56,7 @@ def build_parser():
             'submitter itself is submitted as a job (with the resources of '
             '[submitter] in jug_hpc.toml, which must set its wall time), '
             'logging to logs/submitter-<job id>.log.'))
-    commands.add_parser(
+    status = commands.add_parser(
         'status',
         help='show the tasks and workers of each class, and jobs killed by the scheduler',
         description=(
@@ -67,7 +67,12 @@ def build_parser():
             'the scheduler killed (for memory, wall time or by a signal) are '
             'warnings, with what to change in jug_hpc.toml, and so are tasks '
             'locked in a class with no worker queued or running (locks left behind '
-            'by workers that died).'))
+            'by workers that died). With --release-stale, those locks are removed '
+            '(after asking the scheduler again), so that the tasks can run again.'))
+    status.add_argument(
+        '--release-stale', action='store_true',
+        help='remove the locks of tasks locked in a class with no worker queued or '
+             "running (also those of a 'jug execute' started outside jug-hpc)")
     commands.add_parser(
         'cancel',
         help='cancel every queued or running job of the project',
@@ -244,7 +249,11 @@ def cmd_check(args, start):
 
 
 def cmd_status(args, start):
-    '''``jug-hpc status``: the table goes to stdout, kills and notes to stderr'''
+    '''``jug-hpc status``: the table goes to stdout, kills and notes to stderr
+
+    With ``--release-stale``, the released locks are listed on stdout before
+    the table, which then comes from a second count.
+    '''
     from datetime import UTC, datetime
 
     from .classes import Classifier, counts_by_class
@@ -255,29 +264,47 @@ def cmd_status(args, start):
         load_cluster_settings,
         load_project_settings,
     )
-    from .jugstate import JugfileError, project_task_counts
-    from .schedulers.base import JobState, SchedulerError, create_scheduler
+    from .jugstate import JugfileError, project_release_locks, project_task_counts
+    from .schedulers.base import SchedulerError, create_scheduler
     from .state import ProjectState, StateError
-    from .status import status
+    from .status import classes_to_release, locks_to_release, release_messages, status
 
     project_dir = find_project_dir(start)
     if project_dir is None:
         _error(f'no {PROJECT_FILE} found in {start.absolute()} or any parent '
                'directory')
         return 1
+    lines, notes = [], []
     try:
         cluster = load_cluster_settings(project_dir)
         project = load_project_settings(project_dir)
         scheduler = create_scheduler(cluster)
         project_state = ProjectState(project_dir)
-        records = project_state.jobs()
-        ours = [r.job_id for r in records if r.scheduler == scheduler.name]
-        statuses = scheduler.query(ours) if ours else {}
-        finished = [j for j in ours if statuses[j].state is JobState.FINISHED]
-        outcomes = scheduler.outcome(finished) if finished else {}
-        lock_holder = project_state.submitter_lock_holder()
-        counted = project_task_counts(project)
-        by_class = counts_by_class(Classifier.from_project(project), counted.counts)
+        classifier = Classifier.from_project(project)
+        outcomes = {}
+
+        def report():
+            # the scheduler is asked before the tasks are counted (see status.py)
+            records, statuses = _status_jobs(scheduler, project_state, outcomes)
+            lock_holder = project_state.submitter_lock_holder()
+            counted = project_task_counts(project)
+            by_class = counts_by_class(classifier, counted.counts)
+            return counted.locked, status(
+                project, by_class, counted.hit_barrier, records, statuses, outcomes,
+                datetime.now(UTC), scheduler_name=scheduler.name, lock_holder=lock_holder)
+
+        locked, result = report()
+        if args.release_stale and result.stale:
+            records, statuses = _status_jobs(scheduler, project_state, outcomes)
+            still = classes_to_release(result.stale, records, statuses, datetime.now(UTC),
+                                       scheduler_name=scheduler.name)
+            released = {name: project_release_locks(project, hashes)
+                        for name, hashes in locks_to_release(classifier, locked,
+                                                             still).items()}
+            lines, notes = release_messages(result.stale, released)
+            _, result = report()
+        elif args.release_stale:
+            notes = ['no task is locked in a class without workers: no lock released']
     except (ConfigError, SchedulerError, StateError) as e:
         _error(e)
         return 1
@@ -286,17 +313,32 @@ def cmd_status(args, start):
             print(e.details.rstrip('\n'), file=sys.stderr)
         _error(e)
         return 1
-    report = status(project, by_class, counted.hit_barrier, records, statuses, outcomes,
-                    datetime.now(UTC), scheduler_name=scheduler.name,
-                    lock_holder=lock_holder)
+    for line in lines:
+        print(line)
     # flushed so that the table comes before the messages when both streams go
     # to the same file
-    print(report.text, flush=True)
-    for warning in report.warnings:
+    print(result.text, flush=True)
+    for warning in result.warnings:
         _message('warning', warning)
-    for note in report.notes:
+    for note in notes + result.notes:
         _message('note', note)
     return 0
+
+
+def _status_jobs(scheduler, project_state, outcomes):
+    '''Every recorded job and the status of those of ``scheduler``
+
+    The outcomes of their finished jobs not in ``outcomes`` yet are added to it.
+    '''
+    from .schedulers.base import JobState
+    records = project_state.jobs()
+    ours = [r.job_id for r in records if r.scheduler == scheduler.name]
+    statuses = scheduler.query(ours) if ours else {}
+    finished = [j for j in ours
+                if statuses[j].state is JobState.FINISHED and j not in outcomes]
+    if finished:
+        outcomes.update(scheduler.outcome(finished))
+    return records, statuses
 
 
 def cmd_cancel(args, start):
