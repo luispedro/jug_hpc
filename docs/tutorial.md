@@ -191,4 +191,6 @@ Each worker writes its log to `logs/<class>-<job id>.log`, or
 `logs/<class>-<job id>-<index>.log` for an element of a job array. Follow
 progress with `jug-hpc status`, which shows the tasks of each class in each
 state and its queued and running workers (plain `jug status` works too, as
-usual).
+usual). To stop a run, stop the submitter if it runs in a terminal (Ctrl-C),
+then run `jug-hpc cancel`: it cancels every job of the project still queued or
+running (the submitter job first, with `--as-job`).

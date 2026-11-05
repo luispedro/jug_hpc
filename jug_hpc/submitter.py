@@ -26,7 +26,8 @@ can be tested without a scheduler or a jugfile:
 - :func:`progress` says whether to keep polling (:class:`Progress`);
 - :func:`active_submitter_jobs` finds a submitter job (``jug-hpc submit
   --as-job``) still queued or running, so that a second one is not
-  submitted.
+  submitted (:func:`active_jobs` does the same for any jobs, e.g. those
+  ``jug-hpc cancel`` cancels).
 
 The submitter job is recorded in ``.jug_hpc/jobs.json`` like a worker, with
 the class name :data:`~jug_hpc.config.project.SUBMITTER`; the polling
@@ -64,6 +65,7 @@ __all__ = [
     'SUBMIT_GRACE',
     'Progress',
     'ProgressReport',
+    'active_jobs',
     'active_submitter_jobs',
     'active_workers',
     'class_limits',
@@ -184,6 +186,22 @@ def active_submitter_jobs(records, statuses, now, *, grace=SUBMIT_GRACE):
     ----------
     records : sequence of JobRecord
         The submitter jobs (see :func:`submitter_jobs`)
+    statuses, now, grace
+        As for :func:`active_jobs`
+
+    Returns
+    -------
+    records : list of JobRecord
+    '''
+    return active_jobs(records, statuses, now, grace=grace)
+
+
+def active_jobs(records, statuses, now, *, grace=SUBMIT_GRACE):
+    '''The jobs that have workers queued or running
+
+    Parameters
+    ----------
+    records : sequence of JobRecord
     statuses : dict
         JobId -> JobStatus, as returned by :meth:`Scheduler.query`; a record
         without a status is not active

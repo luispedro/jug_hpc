@@ -167,6 +167,7 @@ is not installed are accepted, with a warning from `jug-hpc config`.
 | `jug-hpc config` | Prints the merged cluster settings (with the file each value came from) and every class fully resolved. Checks the raw scheduler tables. | 0, or 1 on any error |
 | `jug-hpc check` | Loads the jugfile and lists the tasks of each class. Never reads `cluster.toml`, so it runs anywhere. Overlaps are errors; a class matching no task is a warning (often a typo). | 0, or 1 on errors |
 | `jug-hpc status` | Prints a table: per class, tasks waiting/ready/running/failed/finished (loads the jugfile in a subprocess) and workers queued/running (asks the scheduler about every job of the backend in use in `.jug_hpc/jobs.json`), then `Submitter: running (process pid@host)`, `job N, queued`/`running` or `not running`. Warnings: per class and kind (memory, wall time, signal), the jobs killed by the scheduler, with a suggestion. Notes: every task finished; failed tasks block the run; tasks ready but no worker and no submitter. Changes nothing; no lock needed. | 0, or 1 if settings, jugfile, `jobs.json` or scheduler can't be read |
+| `jug-hpc cancel` | Cancels every job in `.jug_hpc/jobs.json` (of the backend in use) that is queued or running, or submitted < 5 min ago and not listed yet; prints `<class>: cancelled job N (queued/running/k workers queued, m running)`. The submitter job (`--as-job`) first: waits up to 2 min until the scheduler no longer lists it and `submitter.lock` is free, then rereads `jobs.json` and cancels the workers. Refuses (cancels nothing) while a submitter runs outside the scheduler (lock held, no submitter job active): stop it with Ctrl-C first. Reads only `cluster.toml` and `jobs.json` (not `jug_hpc.toml`, not the jugfile). PBS: `qdel` (no `-x`). Cancelled jobs are outcome "cancelled", not reported as kills. Workers get SIGTERM, on which Jug releases the running task's lock. Nothing active: a note. | 0; 1 on errors, a refusal, or a submitter job that had not stopped after 2 min (the workers are cancelled anyway: run it again) |
 | `jug-hpc submit` | The polling submitter (below). Only one per project, enforced with a lock. | 0 all finished; 1 blocked by failed tasks, stalled by failing workers, or an error; 130 on Ctrl-C |
 | `jug-hpc submit --as-job` | Submits the polling submitter as a job (`[submitter]` resources; log `logs/submitter-<job id>.log`), and exits. Checks the settings and the jugfile first. Submits nothing if a submitter is running or queued, or no task is left. | 0, or 1 |
 | `jug-hpc submit --all [CLASS...]` | Submits every class with tasks at once (at most one worker per task), and exits. For graphs whose classes don't wait for each other. `default` names the default class. A named class is submitted even with no tasks. | 0, or 1 |
@@ -181,9 +182,7 @@ Listings go to stdout. Messages go to stderr as `jug-hpc: error: ...`,
 `jug-hpc: warning: ...` or `jug-hpc: note: ...`. Error messages about
 configuration name the file and the key.
 
-Not implemented: `jug-hpc cancel`, SLURM, named cluster profiles, detection
-of stale locks. Use `.jug_hpc/jobs.json` with the scheduler's own commands
-(`qdel`) to cancel jobs.
+Not implemented: SLURM, named cluster profiles, detection of stale locks.
 
 ## How the polling submitter works
 
@@ -260,6 +259,7 @@ the raw `directives`.
 | `no task can run: failed tasks: ...` | Tasks raised exceptions. | Read the worker logs, fix the code, `jug cleanup --failed-only`, then `jug-hpc submit` again. |
 | Workers of a later class start and exit without doing anything | They were submitted with `--all` before their dependencies ran. | Use plain `jug-hpc submit`, which waits until the tasks are ready. |
 | Error naming the process (and host) of another submitter | One submitter already runs for this project. | Use that one, or stop it first. |
+| `jug-hpc cancel`: `a submitter is running for this project outside the scheduler` | `jug-hpc submit` runs in a terminal; it would replace the cancelled workers. | Stop it with Ctrl-C (its workers keep running), then `jug-hpc cancel`. |
 | `check` lists fewer tasks than expected | The jugfile stops at a `barrier()` whose tasks are not done. | Expected. The classes apply to later tasks once they appear. |
 | Error about `scheduler` or `account` in `jug_hpc.toml` | Cluster-only key in the project file. | Move it to `cluster.toml` (or a project-dir `cluster.toml`). |
 | No `qstat -x` history on the PBS server | Finished jobs vanish, so outcomes are unknown and failing classes are not detected. | Ask the admins about `job_history_enable`. |

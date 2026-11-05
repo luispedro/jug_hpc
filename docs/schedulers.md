@@ -53,6 +53,11 @@ submissions for its class (see {doc}`submitting`). This needs the PBS server
 to keep job history (`job_history_enable`); without it, a finished job is
 simply gone, and how it ended is not known.
 
+`jug-hpc cancel` deletes jobs with `qdel` (an array job's ID deletes all its
+elements), without `-x`, so PBS keeps their history. The messages `qdel`
+prints for jobs that have already finished or that it does not know are
+ignored.
+
 How a job ended is read from its `Exit_status` (and `substate`):
 
 | PBS reports | jug_hpc reports |

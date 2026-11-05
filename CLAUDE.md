@@ -27,7 +27,8 @@ used by the submitter to stop submitting workers for a class whose jobs keep fai
 (step 8: `submitter.update_failing`/`stopped_classes`, `Progress.STALLED`), and
 to report jobs killed by the scheduler in the submitter's log, with what to change
 (step 4, `kills.py`), and `jug-hpc status` (step 1, `status.py`: tasks and workers per
-class, the submitter, and the kills of every recorded job).
+class, the submitter, and the kills of every recorded job), and `jug-hpc cancel`
+(step 2, `cancel.py`; PBS `cancel()` with `qdel`).
 
 ## Commands
 
@@ -160,6 +161,12 @@ paths replaced by `/home/me/rnaseq`.
   (table text, kill warnings per class and kind, notes). `cli.cmd_status` reads everything
   (all jobs of the backend in `jobs.json`, `query` then `outcome`, task counts in a
   subprocess, `ProjectState.submitter_lock_holder()`) and holds no lock.
+- **`cancel.py`**: `jug-hpc cancel`. `cancel(scheduler, project_state, ...)` cancels the
+  active jobs (`submitter.active_jobs`): a submitter job first, then waits (`CANCEL_WAIT`)
+  until it is no longer listed and `submitter.lock` is free, rereads `jobs.json`, and
+  cancels the workers; `CancelError` (nothing cancelled) while a submitter runs outside
+  the scheduler. `clock`/`sleep` are injectable for tests. `cli.cmd_cancel` reads only
+  `cluster.toml` and `jobs.json`.
 - Workers run `jug execute --keep-failed` (`script.jug_execute_command`), so failed tasks
   stay failed and the submitter can stop instead of resubmitting them forever.
 - **`cli.py`**: argparse subcommands dispatched via the `COMMANDS` dict; command
@@ -178,11 +185,13 @@ paths replaced by `/home/me/rnaseq`.
   scheduler registry is faked by monkeypatching `schedulers.base._entry_points`.
   A `redis://` jugdir can't be used in tests that load the jugfile (Jug connects).
 - End-to-end tests of the submitter use the local backend through
-  `tests/test_poll.py::local_project` (local jobs go to `XDG_STATE_HOME` in `tmp_path`).
+  `tests/test_poll.py::local_project` (local jobs go to `XDG_STATE_HOME` in `tmp_path`;
+  `tests/test_cancel.py` imports it from there).
   They are the slow tests: a worker may wait one Jug wait cycle (12 s) for its last task.
 - `tests/fake_pbs/qsub` is a fake `qsub` (put on `PATH`, state in `$FAKE_PBS_DIR`) that runs
   each job synchronously in a clean, PBS-like environment (or holds it, if a `hold` file
   exists); `tests/fake_pbs/qstat` serves `qstat -f -F json [-x] [-t]` for its jobs.
+  `tests/fake_pbs/qdel` deletes held jobs (they become finished, substate 91).
   `tests/test_fake_pbs.py` uses them for end-to-end PBS tests. Real `qstat` output, recorded on
   PBS Professional 2026.1 (names replaced), is in `tests/pbs_output/pbspro-2026.1/`;
   `tests/manual/pbs/` is the kit that recorded it (`run-everything.sh`, see its README),
@@ -190,5 +199,5 @@ paths replaced by `/home/me/rnaseq`.
   their behaviour. Sample PBS command output for unit tests lives in `tests/pbs_output/`.
   Because of the clean environment, projects there need `setup = "export PATH=<venv
   bin>:$PATH"`, and a job can't run `qsub` itself (`env -i` drops `FAKE_PBS_DIR`), so
-  `submit --as-job` has no fake-PBS end-to-end test. There is no fake `qdel`/`qrls`.
+  `submit --as-job` has no fake-PBS end-to-end test. There is no fake `qrls`.
 - Commit messages are short imperative summaries (`Add ...`, `Keep ...`).

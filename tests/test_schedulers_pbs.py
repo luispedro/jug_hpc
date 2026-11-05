@@ -39,7 +39,9 @@ from jug_hpc.schedulers.pbs import (
     parse_job_id,
     parse_qstat_outcomes,
     parse_qstat_output,
+    qdel_command,
     scheduler_log_dir,
+    unexpected_qdel_errors,
     unexpected_qstat_errors,
     validate_raw_options,
 )
@@ -408,6 +410,7 @@ def test_parse_qstat_outcomes_fails():
     ({'Exit_status': 1, 'resources_used': 'x', 'Resource_List': {'walltime': 'long'}},
      JobOutcome(Outcome.FAILED, 1, None, 'exit status 1')),
     ({}, JobOutcome(Outcome.UNKNOWN, detail='no exit status (deleted before it started?)')),
+    ({'substate': 91}, JobOutcome(Outcome.CANCELLED, detail='deleted with qdel before it started')),
     ({'Exit_status': True},
      JobOutcome(Outcome.UNKNOWN, detail='no exit status (deleted before it started?)')),
 ])
@@ -428,6 +431,12 @@ def test_element_outcome_array_limits():
 def test_array_exit_outcome(status, outcome):
     attrs = {} if status is None else {'Exit_status': status}
     assert array_exit_outcome(attrs).outcome is outcome
+
+
+def test_array_exit_outcome_deleted():
+    '''An array deleted before any element started has no exit status'''
+    assert array_exit_outcome({'substate': 91}) == JobOutcome(
+        Outcome.CANCELLED, detail='deleted with qdel before it started')
 
 
 def test_outcome():
@@ -665,3 +674,42 @@ def test_golden_submitter():
     spec = replace(SPEC, class_name='submitter', cpus=1, memory=2 * 2**30, time=7 * 86400,
                    max_seconds=None, command=('jug-hpc', 'submit', '--interval=60'))
     golden('submitter.sh', render(spec))
+
+
+# --- cancel ---------------------------------------------------------------------
+
+def test_qdel_command():
+    # no -x: the deleted jobs' history is kept, for outcome()
+    assert qdel_command(['1.s', '2[].s']) == ['qdel', '1.s', '2[].s']
+
+
+def test_unexpected_qdel_errors():
+    stderr = 'qdel: Unknown Job Id 99.pbs01\nqdel: Job has finished 98.pbs01\n'
+    assert unexpected_qdel_errors(stderr) == []
+    assert unexpected_qdel_errors('qdel: Unauthorized Request 97.pbs01\n' + stderr) == [
+        'qdel: Unauthorized Request 97.pbs01']
+
+
+def test_cancel():
+    runner = FakeRunner().on('qdel', returncode=35, stderr='qdel: Job has finished 2.s\n')
+    pbs = PBSScheduler(CLUSTER, runner)
+    pbs.cancel([JobId('1[].s'), JobId('2.s')])
+    pbs.cancel([])
+    assert runner.argvs == [('qdel', '1[].s', '2.s')]
+
+
+def test_cancel_batches():
+    runner = FakeRunner().on('qdel')
+    PBSScheduler(CLUSTER, runner).cancel([JobId(f'{i}.s') for i in range(QSTAT_BATCH + 1)])
+    assert [len(c.argv) - 1 for c in runner.calls] == [QSTAT_BATCH, 1]
+
+
+@pytest.mark.parametrize('returncode, stderr, message', [
+    (159, 'qdel: Unauthorized Request 1.s\n', 'Unauthorized Request'),
+    (1, '', 'exit status 1'),
+    (127, 'qdel: command not found', 'command not found'),
+])
+def test_cancel_fails(returncode, stderr, message):
+    runner = FakeRunner().on('qdel', returncode=returncode, stderr=stderr)
+    with pytest.raises(SchedulerError, match=f'pbs: could not cancel jobs: (?s:.*){message}'):
+        PBSScheduler(CLUSTER, runner).cancel(['1.s'])

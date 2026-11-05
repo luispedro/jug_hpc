@@ -1,11 +1,12 @@
-'''The PBS backend against a fake ``qsub`` and ``qstat`` (``tests/fake_pbs/``) on ``PATH``
+'''The PBS backend against a fake ``qsub``, ``qstat`` and ``qdel`` on ``PATH``
 
-The fake records how it was called and runs each job before returning, the way
-PBS would: from ``$HOME``, with a clean environment and PBS's variables, and
-one run per array index. So these tests check what the unit tests in
-``test_schedulers_pbs.py`` cannot: that the commands jug_hpc runs (or prints
-with ``--dry-run``) submit scripts that run a jugfile to completion, and that
-jobs are queried with commands that PBS understands.
+The fakes (in ``tests/fake_pbs/``) record how they were called, and the fake
+``qsub`` runs each job before returning, the way PBS would: from ``$HOME``,
+with a clean environment and PBS's variables, and one run per array index. So
+these tests check what the unit tests in ``test_schedulers_pbs.py`` cannot:
+that the commands jug_hpc runs (or prints with ``--dry-run``) submit scripts
+that run a jugfile to completion, and that jobs are queried and cancelled with
+commands that PBS understands.
 '''
 import os
 import shlex
@@ -86,7 +87,7 @@ def fake_pbs(tmp_path, monkeypatch):
 
 
 def qsub_calls(pbs_dir, command='qsub'):
-    '''(cwd, arguments) of each qsub (or qstat) call'''
+    '''(cwd, arguments) of each qsub (or qstat, or qdel) call'''
     lines = (pbs_dir / f'{command}.log').read_text().splitlines()
     return [(Path(cwd), args.split('\t')) for cwd, args in
             (line.split('\t', 1) for line in lines)]
@@ -268,3 +269,49 @@ def test_fake_qstat_without_history(fake_pbs):
         ('qstat: 1001.fakepbs Job has finished, use -x or -H to obtain historical job '
          'information'),
         'qstat: Unknown Job Id 5.fakepbs']
+
+
+def test_cancel_held(fake_pbs, capsys):
+    '''jug-hpc cancel deletes held jobs with qdel, which PBS then reports as deleted'''
+    project_dir, pbs_dir = fake_pbs
+    pbs_dir.mkdir()
+    (pbs_dir / 'hold').touch()
+    assert main(['-C', str(project_dir), 'submit', '--all']) == 0
+    capsys.readouterr()
+    assert main(['-C', str(project_dir), 'cancel']) == 0
+    out, err = capsys.readouterr()
+    assert err == ''
+    assert out.splitlines() == [
+        'big: cancelled job 1001[].fakepbs (2 workers queued)',
+        'one: cancelled job 1002.fakepbs (queued)',
+        'default: cancelled job 1003[].fakepbs (2 workers queued)',
+    ]
+    assert [args for _, args in qsub_calls(pbs_dir, 'qdel')] == [
+        ['1001[].fakepbs', '1002.fakepbs', '1003[].fakepbs']]
+    finished = JobStatus(JobState.FINISHED)
+    assert set(query(project_dir).values()) == {finished}
+    deleted = JobOutcome(Outcome.CANCELLED, detail='deleted with qdel before it started')
+    assert outcomes(project_dir) == {
+        '1001[].fakepbs': deleted, '1002.fakepbs': deleted, '1003[].fakepbs': deleted}
+    assert exit_statuses(pbs_dir) == {}     # nothing ran
+
+    # nothing left to cancel: qdel is not run again
+    assert main(['-C', str(project_dir), 'cancel']) == 0
+    out, err = capsys.readouterr()
+    assert out == ''
+    assert err == 'jug-hpc: note: no job of this project is queued or running\n'
+    assert len(qsub_calls(pbs_dir, 'qdel')) == 1
+
+
+def test_fake_qdel_finished_and_unknown(fake_pbs):
+    '''Like PBS, the fake qdel refuses finished and unknown jobs, which the
+    backend ignores'''
+    project_dir, _ = fake_pbs
+    assert main(['-C', str(project_dir), 'submit', '--all', 'one']) == 0
+    p = subprocess.run(['qdel', '1001.fakepbs', '5.fakepbs'],
+                       capture_output=True, text=True, check=False)
+    assert (p.returncode, p.stdout) == (153, '')
+    assert p.stderr.splitlines() == [
+        'qdel: Job has finished 1001.fakepbs', 'qdel: Unknown Job Id 5.fakepbs']
+    PBSScheduler(ClusterSettings(scheduler='pbs')).cancel(
+        [JobId('1001.fakepbs'), JobId('5.fakepbs')])

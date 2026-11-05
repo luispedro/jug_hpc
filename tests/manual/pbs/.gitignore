@@ -11,3 +11,5 @@ run.log
 1-static/jug-status.txt
 1-static/classes.txt
 5-exit-status/jhpc-*
+6-cancel/cancel.log
+6-cancel/status.txt

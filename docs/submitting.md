@@ -259,6 +259,48 @@ failed, and when tasks are ready but no worker is queued or running and no
 submitter is running (run `jug-hpc submit`). The exit status is 0 unless the
 settings, the jugfile, `jobs.json` or the scheduler can't be read.
 
+## Cancelling a run: `jug-hpc cancel`
+
+`jug-hpc cancel` cancels every job in `.jug_hpc/jobs.json` that is queued or
+running: the submitter job, if there is one, and the workers. Here, with
+`submit --as-job` and its workers running:
+
+```
+$ jug-hpc cancel
+submitter: cancelled job 1 (running)
+align: cancelled job 2 (10 workers running)
+default: cancelled job 3 (4 workers running)
+```
+
+A submitter would replace the cancelled workers, as their tasks are still
+ready, so it goes first. `cancel` cancels the submitter job, waits (up to 2
+minutes) until it has stopped, and only then cancels the workers, including
+any the submitter submitted in the meantime. If the submitter job has not
+stopped by then, the workers are cancelled anyway, with an error asking you to
+run `jug-hpc cancel` again once it has stopped (exit status 1).
+
+A submitter running outside the scheduler (`jug-hpc submit` on a login node)
+can't be cancelled this way, so `cancel` then cancels nothing and fails, naming
+its process. Stop it first with Ctrl-C (its workers keep running), then run
+`jug-hpc cancel`.
+
+Cancelled workers get `SIGTERM` (and later `SIGKILL` from the scheduler, if
+they are still running), on which `jug execute` releases the lock of the task
+it was running, so those tasks are ready again. To carry on later, run
+`jug-hpc submit` again. Cancelled jobs are not reported as killed by
+`jug-hpc status`. Jobs that have already ended are left alone, so running
+`cancel` twice does no harm:
+
+```
+$ jug-hpc cancel
+jug-hpc: note: no job of this project is queued or running
+```
+
+`cancel` reads only the cluster settings and `jobs.json`: it neither loads the
+jugfile nor reads `jug_hpc.toml`, so it works even while they have errors.
+Jobs recorded with another scheduler backend (e.g. the local one, while trying
+the project out) are not cancelled; a note says how many.
+
 ## Static submission: `--all` and `--dry-run`
 
 `jug-hpc submit --all` submits workers for every class with tasks, all at
@@ -354,15 +396,13 @@ logs/                     # the worker logs (the `logs` setting)
 ```
 
 `jobs.json` lists the jobs in the order they were submitted, with their
-scheduler job IDs. Until `jug-hpc cancel` exists, use it to find the jobs to
-cancel by hand.
+scheduler job IDs. `jug-hpc status` and `jug-hpc cancel` use it to find the
+project's jobs.
 
 ## Current limitations
 
 jug_hpc is in early development. In particular:
 
-- `jug-hpc cancel` is not written yet. Use your scheduler's own commands
-  (`qdel`) with the job IDs in `.jug_hpc/jobs.json`.
 - Locks left behind are not detected yet. A worker killed with `SIGKILL`
   (for example for exceeding its memory) leaves its task's lock behind (one
   killed with `SIGTERM`, as for wall time, usually releases it). With a plain

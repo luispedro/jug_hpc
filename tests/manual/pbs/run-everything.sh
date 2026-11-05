@@ -20,7 +20,7 @@ cd -- "$KIT" || exit 1
 
 if [ "${1:-}" = --clean ]; then
     rm -rf -- recorded run.log */jugfile.jugdata */.jug_hpc */logs */submit.log */check.txt \
-        1-static/dry-run.txt 1-static/jug-status.txt 1-static/classes.txt 5-exit-status/jhpc-*
+        6-cancel/cancel.log 6-cancel/status.txt 1-static/dry-run.txt 1-static/jug-status.txt 1-static/classes.txt 5-exit-status/jhpc-*
     exit 0
 fi
 : "${RPID:?set RPID to the project for qsub -P, e.g. RPID=ab12 $0}"
@@ -30,7 +30,7 @@ if [ -e recorded ] && [ -z "${STEPS:-}" ]; then
          "or choose steps to rerun with STEPS" >&2
     exit 1
 fi
-STEPS=${STEPS:-1 2 3 4 5}
+STEPS=${STEPS:-1 2 3 4 5 6}
 mkdir -p recorded
 exec > >(tee -a run.log) 2>&1
 
@@ -167,6 +167,38 @@ step5() (
     # shellcheck disable=SC2046
     collect as-job $(job_ids)
     grep -q '^OK' check.txt
+)
+
+# --- 6. jug-hpc cancel -------------------------------------------------------------
+step6() (
+    cd 6-cancel || exit 1
+    jug-hpc submit --as-job --interval=30 2>&1 | tee submit.log
+    [ "${PIPESTATUS[0]}" = 0 ] || exit 1
+    # wait for the submitter to submit workers, and for them to start
+    waited=0
+    while [ -z "$(job_ids default)" ]; do
+        [ "$waited" -lt "$WAIT" ] || exit 1
+        sleep 15
+        waited=$((waited + 15))
+    done
+    # shellcheck disable=SC2046
+    W RBEFX $(job_ids default)
+    jug-hpc cancel 2>&1 | tee cancel.log
+    st=${PIPESTATUS[0]}
+    echo "exit status: $st" >>cancel.log
+    # shellcheck disable=SC2046
+    W F $(job_ids)
+    # again: nothing is left to cancel
+    { jug-hpc cancel; echo "exit status: $?"; } >>cancel.log 2>&1
+    jug-hpc status >status.txt 2>&1
+    # shellcheck disable=SC2046
+    collect cancel $(job_ids)
+    # qdel's messages for a finished job and an unknown one (which the backend ignores)
+    # shellcheck disable=SC2046
+    { qdel $(job_ids submitter) 99999999; echo "exit status: $?"; } \
+        >recorded/qdel-finished-unknown.txt 2>&1
+    cat recorded/qdel-finished-unknown.txt
+    [ "$st" = 0 ]
 )
 
 echo "--- run of $(date '+%F %T'), steps: $STEPS" >>recorded/summary.txt

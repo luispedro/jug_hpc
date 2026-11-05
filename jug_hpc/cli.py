@@ -65,6 +65,16 @@ def build_parser():
             '.jug_hpc/jobs.json), and whether a submitter is running. Jobs that '
             'the scheduler killed (for memory, wall time or by a signal) are '
             'warnings, with what to change in jug_hpc.toml.'))
+    commands.add_parser(
+        'cancel',
+        help='cancel every queued or running job of the project',
+        description=(
+            'Cancel every job recorded in .jug_hpc/jobs.json that is queued or '
+            'running: the submitter job (submit --as-job) first, waiting until it '
+            'has stopped, then the workers. Nothing is cancelled while a submitter '
+            'runs outside the scheduler (jug-hpc submit in a terminal), as it would '
+            'replace the workers: stop it first. The jugfile is not loaded, and '
+            'jug_hpc.toml is not read.'))
     mode = submit.add_mutually_exclusive_group()
     mode.add_argument('--all', action='store_true',
                       help='submit every class now, and exit')
@@ -283,6 +293,42 @@ def cmd_status(args, start):
         _message('warning', warning)
     for note in report.notes:
         _message('note', note)
+    return 0
+
+
+def cmd_cancel(args, start):
+    '''``jug-hpc cancel``: one line per cancelled job on stdout'''
+    from .cancel import CancelError, cancel, describe_status
+    from .config import PROJECT_FILE, ConfigError, find_project_dir, load_cluster_settings
+    from .schedulers.base import SchedulerError, create_scheduler
+    from .state import ProjectState, StateError
+
+    project_dir = find_project_dir(start)
+    if project_dir is None:
+        _error(f'no {PROJECT_FILE} found in {start.absolute()} or any parent '
+               'directory')
+        return 1
+    try:
+        cluster = load_cluster_settings(project_dir)
+        scheduler = create_scheduler(cluster)
+        result = cancel(scheduler, ProjectState(project_dir))
+    except (CancelError, ConfigError, SchedulerError, StateError) as e:
+        _error(e)
+        return 1
+    for record, status in result.cancelled:
+        print(f'{record.class_name}: cancelled job {record.job_id} '
+              f'({describe_status(record, status)})', flush=True)
+    for other, n in result.others.items():
+        _message('note', f'{n} job{"s" if n != 1 else ""} submitted with the {other!r} '
+                         f'backend not cancelled (the backend in use is {scheduler.name!r})')
+    if not result.cancelled:
+        _message('note', 'no job of this project is queued or running')
+    if result.submitter_left:
+        ids = ', '.join(r.job_id for r in result.submitter_left)
+        _error(f'the submitter job ({ids}) had not stopped after it was cancelled, so it '
+               "may have submitted workers since; run 'jug-hpc cancel' again once it "
+               'has stopped')
+        return 1
     return 0
 
 
@@ -627,6 +673,7 @@ COMMANDS = {
     'check': cmd_check,
     'submit': cmd_submit,
     'status': cmd_status,
+    'cancel': cmd_cancel,
 }
 
 

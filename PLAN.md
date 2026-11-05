@@ -300,9 +300,32 @@ CPUs of the worker that ran them).
      active worker and no submitter ("run 'jug-hpc submit'"); jobs of
      another backend not queried. Exit status 0 unless something can't be
      read.
-2. `jug-hpc cancel`: cancel every job recorded for the project, including the
-   submitter job. (The fake PBS has no `qdel`/`qrls` yet: held jobs stay
-   held.)
+2. Done: `jug-hpc cancel`: cancel every job recorded for the project that is
+   queued or running, including the submitter job (`cancel.py`;
+   `cli.cmd_cancel`; PBS `cancel()` with `qdel`; fake `qdel` in
+   `tests/fake_pbs/`). Decisions:
+   - Active as for the submitter (`submitter.active_jobs`): an unknown job
+     within `SUBMIT_GRACE` is cancelled too (cancelling it twice is harmless).
+   - The submitter job first, then wait (up to `CANCEL_WAIT`, 120 s) until the
+     scheduler no longer lists it as queued/running *and* `submitter.lock` is
+     free; then reread `jobs.json` and cancel the workers (so workers it
+     submitted meanwhile are cancelled too). If it has not stopped, the
+     workers are cancelled anyway, with an error (exit status 1).
+   - A submitter outside the scheduler (lock held, no active submitter job)
+     is refused: nothing cancelled, "stop it first (Ctrl-C)". No `--force`
+     yet; add one if users ask.
+   - Reads only `cluster.toml` and `jobs.json` (not `jug_hpc.toml`, not the
+     jugfile), so it works while they have errors. Other backends' jobs: a
+     note. No per-class selection, no confirmation prompt (as `qdel`).
+   - PBS: `qdel` without `-x` (keeps history for `outcome()`), batched as
+     `qstat`; its messages for finished/unknown jobs (`Job has finished`,
+     `Unknown Job Id`) are ignored. These messages are from OpenPBS's
+     sources: step 6 of the manual kit (`tests/manual/pbs/6-cancel`) records
+     them, and the whole cancel, on a real cluster. A job deleted before it
+     started (substate 91, no `Exit_status`) is now `CANCELLED`, not
+     `UNKNOWN`.
+   - Noticed: the submitter job's log just stops when it is cancelled
+     (Python dies on SIGTERM); a SIGTERM handler could log "cancelled".
 3. Done: `outcome()` in the PBS backend (`qstat -f -F json -x -t`, so array
    elements are listed with their own `Exit_status`; codes and the wall-time
    heuristic in `pbs.py`'s docstring). Arrays get their worst worker's

@@ -10,7 +10,7 @@ first.
 
 ## All at once: `run-everything.sh`
 
-Runs steps 0 to 5 one after the other, unattended, keeping every result in
+Runs steps 0 to 6 one after the other, unattended, keeping every result in
 this directory. On a login node, in `tmux`/`screen` (or with `nohup`):
 
 ```bash
@@ -167,11 +167,36 @@ cd ..
 Look for: as in step 3, in `logs/submitter-<id>.log`. If the job fails at once,
 see `logs/scheduler/`.
 
+## 6. `jug-hpc cancel`
+
+The submitter as a job again, with tasks too long to finish (20 minutes each).
+Once its workers run, `jug-hpc cancel` cancels the submitter job first, waits
+until it has stopped, and then cancels the workers.
+
+```bash
+cd 6-cancel
+jug-hpc submit --as-job --interval=30
+# once a worker is running (jug-hpc status, or qstat):
+jug-hpc cancel 2>&1 | tee cancel.log
+# once every job has ended:
+jug-hpc cancel                          # nothing left: a note, exit status 0
+jug-hpc status > status.txt 2>&1        # no job reported as killed
+../collect.sh cancel $(python -c "import json; print(*(j['job_id'] for j in json.load(open('.jug_hpc/jobs.json'))['jobs']))")
+qdel SUBMITTER_ID 99999999 > ../recorded/qdel-finished-unknown.txt 2>&1; echo "exit status: $?" >> ../recorded/qdel-finished-unknown.txt
+cd ..
+```
+
+Look for: `cancel` lists the submitter job first, then the workers, and exits
+with status 0; no worker is submitted after it (`logs/submitter-<id>.log`); the
+jobs end deleted (`substate` 91 in `recorded/cancel-t.json`). The messages of
+the last `qdel` (a finished job, an unknown one) are what the backend expects
+to ignore: if they differ, `jug-hpc cancel` fails on jobs that have ended.
+
 ## Sending back the results
 
 ```bash
 tar czf pbs-results.tgz recorded 1-static/dry-run.txt \
-    */submit.log */check.txt */logs 5-exit-status/*.o*
+    */submit.log */check.txt */logs 5-exit-status/*.o* 6-cancel/cancel.log 6-cancel/status.txt
 ```
 
 Also note anything odd: error messages, jobs rejected by `qsub`, or a step that

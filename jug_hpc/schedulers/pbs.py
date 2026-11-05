@@ -80,6 +80,13 @@ substate 91; a job over its memory is killed by the cgroup's OOM killer, which
 PBS shows only as ``137`` (SIGKILL), so it is reported as a SIGKILL that is
 probably a memory kill. ``Exit_status`` may be an integer or a string
 (``"-29"``). The other codes are from the documentation and OpenPBS's sources.
+
+Jobs are cancelled with ``qdel JOB...`` (:data:`QSTAT_BATCH` jobs per call;
+an array job's ID deletes all its elements), without ``-x``, so the scheduler
+keeps the deleted jobs' history. ``qdel`` exits with an error when some job
+has already finished or is unknown; its messages about those (``Unknown Job
+Id``, ``Job has finished``, as in OpenPBS's sources; not yet recorded on a
+real cluster) are ignored, as in ``qstat``'s output.
 '''
 import difflib
 import json
@@ -125,8 +132,10 @@ __all__ = [
     'parse_job_id',
     'parse_qstat_outcomes',
     'parse_qstat_output',
+    'qdel_command',
     'qstat_command',
     'scheduler_log_dir',
+    'unexpected_qdel_errors',
     'unexpected_qstat_errors',
     'validate_raw_options',
 ]
@@ -201,14 +210,15 @@ PBS_EXIT_CODES = {
 #: ``JOB_SUBSTATE_TERMINATED``)
 SUBSTATE_TERMINATED = 91
 
-#: Jobs per ``qstat`` call
+#: Jobs per ``qstat`` (or ``qdel``) call
 QSTAT_BATCH = 100
 
-#: Seconds before a ``qstat`` call is given up
+#: Seconds before a ``qstat`` (or ``qdel``) call is given up
 QSTAT_TIMEOUT = 300
 
 # qstat's errors about jobs it does not list: unknown jobs (e.g. history
-# purged), and finished jobs when asked without -x
+# purged), and finished jobs when asked without -x; qdel's about jobs it cannot
+# delete for the same reasons
 _QSTAT_MISSING_RE = re.compile(r'Unknown Job Id|Job has finished')
 
 _ARRAY_COUNT_RE = re.compile(r'([A-Za-z]+):(\d+)\Z')
@@ -326,6 +336,11 @@ def qstat_command(jobs, elements=False):
     With ``elements``, it also lists the elements of array jobs (``-t``).
     '''
     return ['qstat', '-f', '-F', 'json', '-x', *(['-t'] if elements else []), *jobs]
+
+
+def qdel_command(jobs):
+    '''The ``qdel`` command line that cancels ``jobs`` (keeping their history)'''
+    return ['qdel', *jobs]
 
 
 def _short_id(job_id):
@@ -508,13 +523,16 @@ def element_outcome(attrs, limits=None):
     outcome : JobOutcome
     '''
     status = _exit_status(attrs)
+    deleted = _int_attr(attrs, 'substate') == SUBSTATE_TERMINATED
     if status is None:
+        if deleted:
+            return JobOutcome(Outcome.CANCELLED, detail='deleted with qdel before it started')
         return JobOutcome(Outcome.UNKNOWN,
                           detail='no exit status (deleted before it started?)')
     if status == 0:
         return JobOutcome(Outcome.SUCCESS, 0)
     signum = _killed_by(status) if status > 0 else None
-    if _int_attr(attrs, 'substate') == SUBSTATE_TERMINATED:
+    if deleted:
         return JobOutcome(Outcome.CANCELLED, status, signum,
                           f'deleted with qdel (Exit_status {status})')
     if status < 0:
@@ -557,6 +575,8 @@ def array_exit_outcome(attrs):
         return JobOutcome(Outcome.SUCCESS, 0)
     if status == 1:
         return JobOutcome(Outcome.FAILED, 1, None, 'some workers failed (Exit_status 1)')
+    if status is None and _int_attr(attrs, 'substate') == SUBSTATE_TERMINATED:
+        return JobOutcome(Outcome.CANCELLED, detail='deleted with qdel before it started')
     detail = 'no exit status' if status is None else (
         f'some workers were deleted or PBS failed (Exit_status {status})')
     return JobOutcome(Outcome.UNKNOWN, status, None, detail)
@@ -615,6 +635,12 @@ def unexpected_qstat_errors(stderr):
     '''Lines of ``qstat``'s stderr other than those about jobs it does not list'''
     return [line for line in stderr.splitlines()
             if line.strip() and not _QSTAT_MISSING_RE.search(line)]
+
+
+def unexpected_qdel_errors(stderr):
+    '''Lines of ``qdel``'s stderr other than those about jobs that have finished
+    or are unknown'''
+    return unexpected_qstat_errors(stderr)
 
 
 def match_jobs(jobs, found):
@@ -719,21 +745,30 @@ class PBSScheduler(Scheduler):
     def validate_raw_options(cls, raw, where):
         validate_raw_options(raw, where)
 
-    def _qstat(self, jobs, elements=False):
-        '''Run ``qstat`` on ``jobs`` in batches; yields each call's stdout'''
+    def _batches(self, jobs, command, unexpected, what):
+        '''Run ``command(batch)`` on ``jobs`` in batches; yields each call's stdout
+
+        A call that fails is an error unless its stderr has only messages that
+        ``unexpected`` (a function of the stderr) does not return.
+        '''
         jobs = list(jobs)
         for start in range(0, len(jobs), QSTAT_BATCH):
-            argv = qstat_command(jobs[start:start + QSTAT_BATCH], elements)
+            argv = command(jobs[start:start + QSTAT_BATCH])
             try:
                 result = self.runner.run(argv, check=False, timeout=QSTAT_TIMEOUT)
             except CommandError as e:
-                raise SchedulerError(f'pbs: could not query jobs: {e}') from e
-            # qstat exits with an error when it does not know some of the jobs
-            if result.returncode != 0 and (unexpected_qstat_errors(result.stderr)
+                raise SchedulerError(f'pbs: could not {what}: {e}') from e
+            # qstat and qdel exit with an error when some jobs are unknown
+            if result.returncode != 0 and (unexpected(result.stderr)
                                            or not result.stderr.strip()):
                 error = CommandError(argv, result.returncode, result.stdout, result.stderr)
-                raise SchedulerError(f'pbs: could not query jobs: {error}')
+                raise SchedulerError(f'pbs: could not {what}: {error}')
             yield result.stdout
+
+    def _qstat(self, jobs, elements=False):
+        '''Run ``qstat`` on ``jobs`` in batches; yields each call's stdout'''
+        return self._batches(jobs, lambda batch: qstat_command(batch, elements),
+                             unexpected_qstat_errors, 'query jobs')
 
     def query(self, jobs):
         jobs = list(jobs)
@@ -750,4 +785,5 @@ class PBSScheduler(Scheduler):
         return _matched(jobs, found)
 
     def cancel(self, jobs):
-        raise NotImplementedError('pbs: cancelling jobs is not implemented yet')
+        for _ in self._batches(jobs, qdel_command, unexpected_qdel_errors, 'cancel jobs'):
+            pass
