@@ -515,7 +515,7 @@ def element_outcome(attrs, limits=None):
         return JobOutcome(Outcome.SUCCESS, 0)
     signum = _killed_by(status) if status > 0 else None
     if _int_attr(attrs, 'substate') == SUBSTATE_TERMINATED:
-        return JobOutcome(Outcome.KILLED_SIGNAL, status, signum,
+        return JobOutcome(Outcome.CANCELLED, status, signum,
                           f'deleted with qdel (Exit_status {status})')
     if status < 0:
         outcome, what = PBS_EXIT_CODES.get(status, (Outcome.FAILED, 'PBS error'))

@@ -106,6 +106,10 @@ class PollResult:
         Class name -> the jobs that ended in error, as ``(JobRecord,
         JobOutcome)`` pairs, for the classes that get no new workers (see
         :func:`jug_hpc.submitter.stopped_classes`)
+    ended : list of (JobRecord, JobOutcome)
+        The jobs this submitter saw queued or running that this poll saw end,
+        with how they ended, in submission order (jobs whose outcome the
+        scheduler did not give are left out)
     submitted : list of JobRecord
         The jobs submitted by this poll
     errors : list of SchedulerError
@@ -118,6 +122,7 @@ class PollResult:
     active: dict
     report: object
     stopped: dict = field(default_factory=dict)
+    ended: list = field(default_factory=list)
     submitted: list = field(default_factory=list)
     errors: list = field(default_factory=list)
     output: str = ''
@@ -216,16 +221,15 @@ class Submitter:
         # can be done again
         self.settled.update(r.job_id for r in settled)
         self.watched = {r.job_id for r in records} - self.settled
-        self.failing = update_failing(
-            self.failing, by_class, self.previous,
-            [(r, outcomes[r.job_id]) for r in seen_ending if r.job_id in outcomes])
+        ended = [(r, outcomes[r.job_id]) for r in seen_ending if r.job_id in outcomes]
+        self.failing = update_failing(self.failing, by_class, self.previous, ended)
         self.previous = by_class
 
         active = active_workers(records, statuses, now)
         stopped = stopped_classes(self.failing)
         stalled = {n: jobs for n, jobs in stopped.items() if not active.get(n)}
         report = progress(by_class, counted.hit_barrier, stalled)
-        result = PollResult(by_class, counted.hit_barrier, active, report, stopped,
+        result = PollResult(by_class, counted.hit_barrier, active, report, stopped, ended,
                             output=counted.output)
         if report.progress is not Progress.RUNNING:
             return result

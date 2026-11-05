@@ -175,7 +175,7 @@ def element_outcome(record):
         return JobOutcome(Outcome.KILLED_TIME, exit_code, signum,
                           'killed: wall time limit reached')
     if killed == 'cancelled':
-        return JobOutcome(Outcome.KILLED_SIGNAL, exit_code, signum, 'cancelled')
+        return JobOutcome(Outcome.CANCELLED, exit_code, signum, 'cancelled')
     if not isinstance(rc, int):
         return JobOutcome(Outcome.UNKNOWN, detail='no exit status recorded')
     if rc == 0:

@@ -98,6 +98,7 @@ class Outcome(enum.Enum):
     KILLED_MEMORY = 'killed-memory'    # killed by the scheduler: memory limit
     KILLED_TIME = 'killed-time'        # killed by the scheduler: wall time limit
     KILLED_SIGNAL = 'killed-signal'    # killed by another signal
+    CANCELLED = 'cancelled'            # deleted by the user (qdel, jug-hpc cancel)
     UNKNOWN = 'unknown'
 
 
@@ -131,7 +132,7 @@ def signal_name(signum):
 
 #: How bad each outcome is, for summarizing an array (worst first)
 OUTCOME_SEVERITY = (Outcome.KILLED_MEMORY, Outcome.KILLED_TIME, Outcome.KILLED_SIGNAL,
-                    Outcome.FAILED, Outcome.UNKNOWN, Outcome.SUCCESS)
+                    Outcome.FAILED, Outcome.CANCELLED, Outcome.UNKNOWN, Outcome.SUCCESS)
 
 
 def combine_outcomes(outcomes):

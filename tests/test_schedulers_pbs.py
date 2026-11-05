@@ -379,9 +379,9 @@ def test_parse_qstat_outcomes_fails():
     ({'Exit_status': 193}, JobOutcome(Outcome.FAILED, 193, None, 'exit status 193')),
     # deleted with qdel (substate 91), whatever the exit status
     ({'Exit_status': 143, 'substate': 91},
-     JobOutcome(Outcome.KILLED_SIGNAL, 143, 15, 'deleted with qdel (Exit_status 143)')),
+     JobOutcome(Outcome.CANCELLED, 143, 15, 'deleted with qdel (Exit_status 143)')),
     ({'Exit_status': 271, 'substate': '91'},
-     JobOutcome(Outcome.KILLED_SIGNAL, 271, 15, 'deleted with qdel (Exit_status 271)')),
+     JobOutcome(Outcome.CANCELLED, 271, 15, 'deleted with qdel (Exit_status 271)')),
     ({'Exit_status': 3, 'substate': 93}, JobOutcome(Outcome.FAILED, 3, None, 'exit status 3')),
     # a SIGKILL at the wall time limit is a wall time kill, not a memory one
     ({'Exit_status': 137, 'resources_used': {'walltime': '01:00:00'},
@@ -514,9 +514,9 @@ EXIT_3 = JobOutcome(Outcome.FAILED, 3, None, 'exit status 3')
         Outcome.KILLED_TIME, -29, None,
         'killed by PBS: wall time limit exceeded (Exit_status -29)')}),
     ('qstat-xt-qdel.json', {'27677413.aqua': JobOutcome(
-        Outcome.KILLED_SIGNAL, 143, 15, 'deleted with qdel (Exit_status 143)')}),
+        Outcome.CANCELLED, 143, 15, 'deleted with qdel (Exit_status 143)')}),
     ('qstat-xt-array.json', {'27677414[].aqua': JobOutcome(
-        Outcome.KILLED_SIGNAL, 143, 15,
+        Outcome.FAILED, 3, None,
         '2 of 3 workers did not succeed (worker 2: exit status 3; '
         'worker 3: deleted with qdel (Exit_status 143))')}),
     ('qstat-xt-array-ok.json', {'27677412[].aqua': SUCCESS}),

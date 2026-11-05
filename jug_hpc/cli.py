@@ -301,6 +301,7 @@ def _poll(args, start):
         load_project_settings,
     )
     from .jugstate import JugfileError
+    from .kills import scheduler_kills
     from .poll import Submitter, run
     from .schedulers.base import SchedulerError, create_scheduler
     from .state import ProjectState, StateError
@@ -313,8 +314,13 @@ def _poll(args, start):
     interval = _interval(args)
     last = [None]
     stopped = set()
+    killed = []
 
     def on_poll(result):
+        kills = scheduler_kills(result.ended)
+        for record, outcome in kills:
+            _message('warning', _kill_message(record, outcome, project))
+        killed.extend(kills)
         for kind, message in _stopped_messages(stopped, result):
             _message(kind, message)
         stopped.clear()
@@ -355,7 +361,29 @@ def _poll(args, start):
     except KeyboardInterrupt:
         _message('note', 'interrupted: the workers already submitted keep running')
         return 130
+    if killed:
+        _message('warning', f'jobs killed by the scheduler: {_kills_by_class(killed)}')
     return _report_end(result.report, _relative(project.logs, project_dir))
+
+
+def _kill_message(record, outcome, project):
+    '''A job killed by the scheduler, and what to change in its class'''
+    from .kills import suggestion
+    message = (f'{_table_label(record.class_name)}: job {record.job_id} ended: '
+               f'{outcome.detail or outcome.outcome.value}')
+    try:
+        rc = project.get_class(record.class_name)
+    except KeyError:    # the class is no longer in jug_hpc.toml
+        return message
+    advice = suggestion(outcome, rc)
+    return f'{message}; {advice}' if advice else message
+
+
+def _kills_by_class(kills):
+    '''``[class.big] 2 for memory; [default] 1 for wall time``'''
+    from .kills import kill_counts, kill_summary
+    return '; '.join(f'{_table_label(name)} {kill_summary(by_outcome)}'
+                     for name, by_outcome in kill_counts(kills).items())
 
 
 def _report_end(report, logs='logs'):

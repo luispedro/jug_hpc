@@ -24,7 +24,9 @@ changes (`--max-interval`). Jug's status cache is deliberately not used (PLAN.md
 Milestone 4 has started: `Scheduler.outcome()` for PBS and local (a `JobOutcome` per
 finished job; arrays combined by `schedulers.base.combine_outcomes`, worst worker wins),
 used by the submitter to stop submitting workers for a class whose jobs keep failing
-(step 8: `submitter.update_failing`/`stopped_classes`, `Progress.STALLED`).
+(step 8: `submitter.update_failing`/`stopped_classes`, `Progress.STALLED`), and
+to report jobs killed by the scheduler in the submitter's log, with what to change
+(step 4, `kills.py`; not yet in `status`, which doesn't exist yet).
 
 ## Commands
 
@@ -145,6 +147,11 @@ paths replaced by `/home/me/rnaseq`.
   `cli._submit_as_job` submits the loop itself as a job (`worker.make_submitter_spec`,
   `submit.prepare_submitter`, `script.submitter_command`) after checking for an active
   submitter job (`submitter.active_submitter_jobs`) and the lock.
+- **`kills.py`**: pure functions on `(JobRecord, JobOutcome)` pairs: which jobs the
+  scheduler killed (`KILLED_*`; `Outcome.CANCELLED` is a user's `qdel`), counts per class,
+  and `suggestion(outcome, rc)` (raise `memory`/`time`, lower `time_fraction`; SIGKILL
+  gets the memory one as a guess). `cli._poll` warns for each killed job in
+  `PollResult.ended` and sums them up per class when the run is over.
 - Workers run `jug execute --keep-failed` (`script.jug_execute_command`), so failed tasks
   stay failed and the submitter can stop instead of resubmitting them forever.
 - **`cli.py`**: argparse subcommands dispatched via the `COMMANDS` dict; command

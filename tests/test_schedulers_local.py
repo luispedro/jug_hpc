@@ -142,7 +142,7 @@ def test_parse_job_id_fails(stdout):
     ({'returncode': 0, 'killed': 'time'},     # exited on its own after SIGTERM
      JobOutcome(Outcome.KILLED_TIME, 0, None, 'killed: wall time limit reached')),
     ({'returncode': -15, 'killed': 'cancelled'},
-     JobOutcome(Outcome.KILLED_SIGNAL, None, 15, 'cancelled')),
+     JobOutcome(Outcome.CANCELLED, None, 15, 'cancelled')),
     ({}, JobOutcome(Outcome.UNKNOWN, detail='no exit status recorded')),
 ])
 def test_element_outcome(record, expected):
@@ -292,7 +292,7 @@ def test_cancel(run):
     assert sched.query([job]) == {job: JobStatus(JobState.RUNNING, running=2)}
     sched.cancel([job, JobId('99')])
     outcome = wait_finished(sched, job)
-    assert outcome.outcome is Outcome.KILLED_SIGNAL
+    assert outcome.outcome is Outcome.CANCELLED
     assert 'cancelled' in outcome.detail
     sched.cancel([job])     # finished: ignored
 
@@ -308,7 +308,7 @@ def test_query_counts_running_workers(run):
         assert time.monotonic() < deadline, 'worker 2 did not end'
         time.sleep(0.1)
     sched.cancel([job])
-    assert wait_finished(sched, job).outcome is Outcome.KILLED_SIGNAL
+    assert wait_finished(sched, job).outcome is Outcome.CANCELLED
     assert sched.query([job]) == {job: JobStatus(JobState.FINISHED)}
 
 

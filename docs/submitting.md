@@ -104,6 +104,42 @@ so a new `jug-hpc submit` gives every class a fresh start. On PBS, this needs
 the server to keep job history (`qstat -x`); without it, finished jobs are
 forgotten at once and their outcome is unknown.
 
+### Workers killed by the scheduler
+
+When a worker is killed by the scheduler, for using more memory or more wall
+time than its class asks for, the submitter prints a warning naming the class,
+the job and what to change in `jug_hpc.toml`: raise `memory`, or raise `time`
+or lower `time_fraction` (a worker takes no new task after `time_fraction ×
+time`, so a task that starts just before then must end in the time left; see
+[early exit](concepts.md#early-exit-time_fraction)). When the run is over, it
+sums up the jobs killed in each class.
+
+Here, one `align` task takes 30 seconds, in a test with a 5-second wall time
+for the class (the output is cut):
+
+```
+[2026-11-05 14:19:23] tasks: 1 waiting, 0 ready, 1 running, 0 failed, 5 finished; workers queued or running: 1
+jug-hpc: warning: [class.align]: job 1 ended: 1 of 2 workers did not succeed (worker 2: killed: wall time limit reached); raise time (now 00:00:05), or lower time_fraction (now 0.8: a task started after 00:00:04 has 00:00:01 left)
+[2026-11-05 14:19:25] align: submitted job 2 (1 worker, .jug_hpc/scripts/align-2.sh)
+...
+jug-hpc: warning: [class.align]: job 3 ended: killed: wall time limit reached; raise time (now 00:00:05), or lower time_fraction (now 0.8: a task started after 00:00:04 has 00:00:01 left)
+[2026-11-05 14:19:42] tasks: 1 waiting, 1 ready, 0 running, 0 failed, 5 finished; workers queued or running: 0
+jug-hpc: warning: jobs killed by the scheduler: [class.align] 3 for wall time
+jug-hpc: error: no task can run: the workers keep failing: [class.align]: 3 jobs in a row ended in error before any task of the class ended (jobs 1, 2, 3; the last: killed: wall time limit reached)
+```
+
+The task was killed three times in a row, so the class was stopped as
+described above.
+
+On clusters that enforce memory limits with cgroups, a worker that runs out of
+memory is killed with `SIGKILL` and the scheduler records nothing else (see
+{doc}`schedulers`), so a job killed by `SIGKILL` gets the memory suggestion
+too, as a guess. Jobs you delete yourself (`qdel`) are not reported. An array
+job is reported once, by its worst worker (killed for memory before killed for
+wall time); the warning lists how each of its workers that did not succeed
+ended. The values in the suggestion are the class's current ones. The local
+backend enforces only the wall time.
+
 ### How often it polls
 
 Each poll loads the jugfile and queries the scheduler, so the submitter backs
@@ -275,12 +311,13 @@ jug_hpc is in early development. In particular:
 - `jug-hpc status` (task counts grouped by class) and `jug-hpc cancel` are not
   written yet. Use `jug status`, your scheduler's own commands and
   `.jug_hpc/jobs.json`.
-- jug_hpc does not yet look at how jobs ended. A worker killed by the
-  scheduler (for exceeding its memory or wall time) leaves its task's lock
-  behind. With a plain jugdir, Jug then counts the task as running forever, so
-  the submitter never finishes (`jug cleanup --locks-only` removes such locks,
-  but only do this when no worker is running). Use the `file_keepalive:` jugdir
-  backend instead: there, a lock that is not refreshed for 30 minutes counts
-  as failed (see the {doc}`faq`).
+- Locks left behind are not detected yet. A worker killed with `SIGKILL`
+  (for example for exceeding its memory) leaves its task's lock behind (one
+  killed with `SIGTERM`, as for wall time, usually releases it). With a plain
+  jugdir, Jug then counts the task as running forever, so the submitter never
+  finishes (`jug cleanup --locks-only` removes such locks, but only do this
+  when no worker is running). Use the `file_keepalive:` jugdir backend
+  instead: there, a lock that is not refreshed for 30 minutes counts as
+  failed (see the {doc}`faq`).
 - The submitter loads the jugfile at every poll. For jugfiles with millions of
   tasks, use a longer `--interval` and `--max-interval`.

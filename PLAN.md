@@ -123,7 +123,7 @@ The job header, arrays, memory units and the three raw-option keys
 - Job outcome: PBS `Exit_status`, where negative values are PBS's own codes
   (including walltime and memory kills, `pbs.PBS_EXIT_CODES`) and values of
   256 or more, or 128 + N, mean "killed by signal N". `substate` 91 means
-  deleted with `qdel`. A failed job that used at least its requested walltime
+  deleted with `qdel` (`Outcome.CANCELLED`, as for a cancelled local job). A failed job that used at least its requested walltime
   counts as a wall-time kill. Checked on PBS Professional 2026.1 with cgroups
   (2026-11-05, recordings in `tests/pbs_output/pbspro-2026.1/`): wall time
   kills are `-29`; `qdel` gives `143` with substate 91; a job over its memory
@@ -297,7 +297,27 @@ CPUs of the worker that ran them).
    result. Used by step 8; step 4 will use it too.
 4. Report jobs killed by the scheduler, broken down by class, in `status` and
    in the submitter's log, with a suggestion (raise `memory`, raise `time`, or
-   lower `time_fraction`).
+   lower `time_fraction`). Done for the submitter's log: `kills.py` (pure:
+   `scheduler_kills`, `kill_counts`, `suggestion`), `PollResult.ended` (the
+   watched jobs each poll saw end, with outcomes), a warning per killed job
+   in `cli._poll` and a per-class summary when the run is over. Decisions:
+   - Killed = KILLED_MEMORY, KILLED_TIME or KILLED_SIGNAL. A new
+     `Outcome.CANCELLED` (qdel, local cancel; severity between FAILED and
+     UNKNOWN) keeps jobs deleted by the user out of the report.
+   - SIGKILL gets the memory suggestion as a guess ("if it used more memory
+     than requested"), as cgroup OOM kills show only as SIGKILL on PBS.
+   - Arrays are reported once, by their worst worker (as
+     `combine_outcomes`); the detail lists the others. Per-worker counts
+     would need `outcome()` to return the workers' outcomes too.
+   - Suggestions use the class as configured now; a class no longer in
+     `jug_hpc.toml` gets none.
+   - Left for `status` (step 1): the same report from `jobs.json` and
+     `outcome()`, including jobs that ended before the submitter started.
+   - Noticed while documenting it: a job that ran tasks and was then killed
+     for wall time counts towards `MAX_FAILED_JOBS` when no task of the class
+     ended between the poll before and the one that sees it end (step 8
+     rule). Fine for a task that never fits, but maybe count only jobs that
+     ran no task (would need per-job task counts; not done).
 5. Stale locks: when a job is known to be dead, find the locks its tasks left
    behind. Report them, and offer `jug-hpc status --release-stale` (wrapping
    Jug's lock removal) rather than removing them silently. Recommend the

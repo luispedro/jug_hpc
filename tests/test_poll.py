@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import os
 import shutil
@@ -434,6 +435,64 @@ def test_poll_succeeded_job_clears_failures(setup):
     assert submitted(r) == [('align', 2)]
 
 
+# --- jobs killed by the scheduler -------------------------------------------------
+
+KILLED_MEMORY = JobOutcome(Outcome.KILLED_MEMORY, -27, None,
+                           'killed by PBS: memory limit exceeded (Exit_status -27)')
+
+
+def test_poll_reports_ended_jobs(setup):
+    '''Each poll gives the jobs it saw end, with their outcomes, once'''
+    submitter, counts, sched, state, _ = setup
+    state.add_job('99.pbs', 'align', 'pbs', 2, '.jug_hpc/scripts/align-1.sh')
+    sched.statuses['99.pbs'] = JobStatus(JobState.FINISHED)    # ended before: left out
+    counts.set(LOAD, ready=1)
+    counts.set(ALIGN, ready=3)
+    r = submitter.poll()
+    assert r.ended == []
+    assert submitted(r) == [('align', 2), ('default', 1)]
+    sched.statuses['1001.pbs'] = JobStatus(JobState.FINISHED)
+    sched.outcomes['1001.pbs'] = KILLED_MEMORY
+    sched.statuses['1002.pbs'] = JobStatus(JobState.FINISHED)
+    r = submitter.poll()
+    assert [(rec.job_id, rec.class_name, o) for rec, o in r.ended] == [
+        ('1001.pbs', 'align', KILLED_MEMORY),
+        ('1002.pbs', 'default', JobOutcome(Outcome.SUCCESS, 0))]
+    assert submitter.poll().ended == []
+
+
+def test_cli_kill_messages(setup):
+    from jug_hpc.cli import _kill_message, _kills_by_class
+    from jug_hpc.kills import scheduler_kills
+    submitter, counts, sched, _state, _ = setup
+    counts.set(LOAD, ready=1)
+    counts.set(ALIGN, ready=3)
+    submitter.poll()
+    killed_time = JobOutcome(Outcome.KILLED_TIME, -29, None,
+                             'killed by PBS: wall time limit exceeded (Exit_status -29)')
+    for job_id, outcome in [('1001.pbs', KILLED_MEMORY), ('1002.pbs', killed_time)]:
+        sched.statuses[job_id] = JobStatus(JobState.FINISHED)
+        sched.outcomes[job_id] = outcome
+    kills = scheduler_kills(submitter.poll().ended)
+    project = submitter.project
+    assert [_kill_message(rec, o, project) for rec, o in kills] == [
+        ('[class.align]: job 1001.pbs ended: killed by PBS: memory limit exceeded '
+         '(Exit_status -27); raise memory (now 1G)'),
+        ('[default]: job 1002.pbs ended: killed by PBS: wall time limit exceeded '
+         '(Exit_status -29); raise time (now 01:00:00), or lower time_fraction (now 0.8: '
+         'a task started after 00:48:00 has 00:12:00 left)'),
+    ]
+    sched.statuses['1003.pbs'] = JobStatus(JobState.FINISHED)
+    sched.outcomes['1003.pbs'] = KILLED_MEMORY
+    kills += scheduler_kills(submitter.poll().ended)
+    assert _kills_by_class(kills) == '[class.align] 2 for memory; [default] 1 for wall time'
+    # a class no longer in jug_hpc.toml: no suggestion
+    gone = dataclasses.replace(kills[0][0], class_name='gone')
+    assert _kill_message(gone, KILLED_MEMORY, project) == (
+        '[class.gone]: job 1001.pbs ended: killed by PBS: memory limit exceeded '
+        '(Exit_status -27)')
+
+
 def test_poll_failed_outcome_query_changes_nothing(setup):
     submitter, counts, sched, _state, _ = setup
     counts.set(ALIGN, ready=3)
@@ -840,6 +899,42 @@ def test_cli_submit_stops_failing_workers(tmp_path, monkeypatch, capsys):
     wait_for_jobs(sched, [r.job_id for r in ProjectState(project_dir).jobs()])
     assert (status, err) == (0, ''), out
     assert out.splitlines()[-1].endswith('every task is finished')
+
+
+SLOW_TASK = '''\
+import time
+from jug import TaskGenerator
+
+@TaskGenerator
+def slow():
+    time.sleep(60)
+
+slow()
+'''
+
+
+@needs_bash
+def test_cli_submit_reports_killed_jobs(tmp_path, monkeypatch, capsys):
+    '''Jobs killed for wall time are reported, with what to change'''
+    toml = '[default]\nmemory = "1G"\ntime = "00:00:02"\nworkers = 1\n'
+    project_dir, sched = local_project(tmp_path, monkeypatch, SLOW_TASK, toml)
+    status = main(['-C', str(project_dir), 'submit', '--interval=0.2'])
+    out, err = capsys.readouterr()
+    jobs = [r.job_id for r in ProjectState(project_dir).jobs()]
+    wait_for_jobs(sched, jobs)
+    assert status == 1, out
+    assert jobs == [str(i) for i in range(1, MAX_FAILED_JOBS + 1)]
+    killed = ('ended: killed: wall time limit reached; raise time (now 00:00:02), or lower '
+              'time_fraction (now 0.8: a task started after 00:00:01 has 00:00:01 left)')
+    assert err.splitlines() == [
+        *(f'jug-hpc: warning: [default]: job {j} {killed}' for j in jobs),
+        'jug-hpc: warning: jobs killed by the scheduler: [default] 3 for wall time',
+        ('jug-hpc: error: no task can run: the workers keep failing: [default]: 3 jobs in a '
+         'row ended in error before any task of the class ended (jobs 1, 2, 3; the last: '
+         'killed: wall time limit reached)'),
+        ("jug-hpc: note: the worker logs (in logs/) and the scheduler's (in logs/scheduler/) "
+         "say why the jobs failed; once fixed, run 'jug-hpc submit' again"),
+    ]
 
 
 BARRIER = '''\
