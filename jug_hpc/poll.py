@@ -29,6 +29,14 @@ interval. This keeps the submitter cheap (each poll loads the jugfile and runs
 ``qstat``) during the long stretches when workers are busy, while
 ``max_interval`` bounds how late it notices tasks that became ready.
 
+When the run ends because no task can run (``BLOCKED`` or ``STALLED``), the
+last poll cancels the workers still queued or running: they have nothing to do,
+as no task is ready (except those of stalled classes, which have no workers)
+or running, but each would hold its allocation for Jug's wait cycles before
+exiting (see :data:`jug_hpc.script.NR_WAIT_CYCLES`), and a queued one would
+still start. Workers are left alone when every task is finished: they exit at
+once.
+
 Jug's status cache (``jug status --cache``) is not used: it is fast because
 it does not load the jugfile again, so it would miss the tasks created after a
 ``barrier()`` and the changes to the jugfile. Measured on a jugfile with 100k
@@ -55,6 +63,7 @@ from .schedulers.checks import check_scheduler_settings
 from .submit import check_jugdir, prepare_class, submit_worker, write_script
 from .submitter import (
     Progress,
+    active_jobs,
     active_workers,
     class_limits,
     is_settled,
@@ -114,6 +123,13 @@ class PollResult:
         The jobs submitted by this poll
     errors : list of SchedulerError
         Submissions that failed (the other classes were still submitted)
+    cancelled : list of (JobRecord, JobStatus)
+        The workers cancelled because the run is over and no task can run
+        (``BLOCKED`` or ``STALLED``), with their status just before, in
+        submission order
+    cancel_error : SchedulerError or None
+        Why they could not be cancelled (the run is over all the same: they
+        exit by themselves once Jug gives up waiting)
     output : str
         What the jugfile wrote while it was loaded
     '''
@@ -125,6 +141,8 @@ class PollResult:
     ended: list = field(default_factory=list)
     submitted: list = field(default_factory=list)
     errors: list = field(default_factory=list)
+    cancelled: list = field(default_factory=list)
+    cancel_error: object = None
     output: str = ''
 
 
@@ -185,7 +203,9 @@ class Submitter:
         '''Query the jobs, count the tasks, and submit the workers needed
 
         Nothing is submitted unless the run is still going on
-        (``Progress.RUNNING``), and nothing for the stopped classes.
+        (``Progress.RUNNING``), and nothing for the stopped classes. When no
+        task can run (``BLOCKED`` or ``STALLED``), the workers still queued or
+        running are cancelled.
 
         Returns
         -------
@@ -231,6 +251,8 @@ class Submitter:
         report = progress(by_class, counted.hit_barrier, stalled)
         result = PollResult(by_class, counted.hit_barrier, active, report, stopped, ended,
                             output=counted.output)
+        if report.progress in (Progress.BLOCKED, Progress.STALLED):
+            self._cancel_idle(result, active_jobs(records, statuses, now), statuses)
         if report.progress is not Progress.RUNNING:
             return result
         for name, n in workers_to_submit(by_class, active, self.limits, stopped).items():
@@ -246,6 +268,18 @@ class Submitter:
                 result.submitted.append(record)
                 self.watched.add(record.job_id)
         return result
+
+    def _cancel_idle(self, result, idle, statuses):
+        '''Cancel the workers ``idle`` (none of them can run a task), noting
+        it in ``result``'''
+        if not idle:
+            return
+        try:
+            self.scheduler.cancel([r.job_id for r in idle])
+        except SchedulerError as e:
+            result.cancel_error = e
+        else:
+            result.cancelled = [(r, statuses[r.job_id]) for r in idle]
 
 
 def run(submitter, *, interval=POLL_INTERVAL, max_interval=None, on_poll=None,

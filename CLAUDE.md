@@ -28,7 +28,8 @@ used by the submitter to stop submitting workers for a class whose jobs keep fai
 to report jobs killed by the scheduler in the submitter's log, with what to change
 (step 4, `kills.py`), and `jug-hpc status` (step 1, `status.py`: tasks and workers per
 class, the submitter, and the kills of every recorded job), and `jug-hpc cancel`
-(step 2, `cancel.py`; PBS `cancel()` with `qdel`).
+(step 2, `cancel.py`; PBS `cancel()` with `qdel`), and the submitter cancelling the
+workers left when no task can run (step 7).
 
 ## Commands
 
@@ -145,6 +146,8 @@ paths replaced by `/home/me/rnaseq`.
   `submit.prepare_class`/`write_script`/`submit_worker`); state kept between polls: settled
   and watched job IDs, the previous counts, and the failing jobs per class (committed only
   after everything that can fail was read, so a failed poll can be redone).
+  The poll that ends a run `BLOCKED`/`STALLED` cancels the worker jobs still active
+  (`PollResult.cancelled`/`cancel_error`; a failed cancel is only a warning).
   `run()` repeats it, doubling the wait while nothing changes (up to `max_interval`);
   first-poll errors are fatal, later `SchedulerError`/`JugfileError` are retried
   (`MAX_FAILED_POLLS`). `cli._poll` holds `ProjectState.submitter_lock()`.

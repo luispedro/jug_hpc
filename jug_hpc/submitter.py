@@ -387,7 +387,9 @@ def progress(by_class, hit_barrier=False, stalled=None):
         ``BLOCKED`` when no task is ready or running and some have failed (the
         waiting tasks depend on them, so no worker could run them); ``RUNNING``
         otherwise. Queued and running workers are not considered (except
-        through ``stalled``): a worker with nothing left to do ends by itself.
+        through ``stalled``): a worker with nothing left to do ends by itself
+        (and :mod:`jug_hpc.poll` cancels those left when the run ends
+        ``BLOCKED`` or ``STALLED``).
     '''
     stalled = {n: jobs for n, jobs in (stalled or {}).items()
                if n in by_class and by_class[n].ready}

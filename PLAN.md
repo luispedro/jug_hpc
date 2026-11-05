@@ -367,9 +367,26 @@ CPUs of the worker that ran them).
    whether it is a note instead, as it would show for most projects.
    (`dict_store`, which workers cannot share at all, is already a warning in
    `check` and an error in `submit`.)
-7. When the submitter stops because of failed tasks, cancel the workers left
-   waiting for tasks that depend on them: each waits `NR_WAIT_CYCLES ×
-   WAIT_CYCLE_TIME` (3 min) before exiting, holding its allocation.
+7. Done: when the submitter stops because of failed tasks, cancel the workers
+   left waiting for tasks that depend on them: each waits `NR_WAIT_CYCLES ×
+   WAIT_CYCLE_TIME` (3 min) before exiting, holding its allocation (and a
+   queued one would still start). Decisions:
+   - The last poll (`BLOCKED` or `STALLED`) cancels *every* worker job that
+     is active as for the submitter (`submitter.active_jobs`, so recent
+     unknown jobs too; not the submitter job), also those of earlier runs or
+     of `--all`. No choice of "which workers wait for blocked tasks" is
+     needed: in both cases no task is running and none is ready except those
+     of stalled classes, which by definition have no active workers.
+   - `FINISHED` leaves workers alone (they exit at once).
+   - The cancelled jobs are in `PollResult.cancelled` (with their status) and
+     logged as `<class>: cancelled job N (<status>): no task can run`. A
+     failed cancel is `PollResult.cancel_error`, a warning; it does not fail
+     the poll (the run is over all the same), so it is not retried.
+   - No option to keep them; add `--keep-workers` if users ask.
+   - Noticed: `jug-hpc status` after a `STALLED` run notes "tasks are ready,
+     but no worker ... run 'jug-hpc submit'" (it does not know the class was
+     stopped). Fine: a new submitter gives the class another chance, but the
+     docs example says to fix the cause first.
 8. Done: workers that die before Jug starts (e.g. a `setup` command that
    fails) left the tasks ready, so the submitter submitted a new job at
    every poll, forever. Now the submitter fetches the outcome of each job it

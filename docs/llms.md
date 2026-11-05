@@ -213,9 +213,12 @@ submitter saw queued or running count, so restarting `jug-hpc submit` gives
 every class a fresh start.
 
 Errors at the first poll are fatal. Later scheduler or jugfile errors are
-retried, up to 5 times in a row. Workers still queued or running when the
-submitter stops are left alone. A worker with nothing to do exits after about
-3 minutes.
+retried, up to 5 times in a row. When the run ends because no task can run
+(the two exit-1 cases), the submitter cancels the workers still queued or
+running (they have nothing to do; each would otherwise hold its allocation for
+about 3 minutes) and logs `<class>: cancelled job N (<status>): no task can
+run`; if that fails, a warning, and it stops anyway. When every task is
+finished, workers are left alone (they exit at once).
 
 The submitter keeps almost no state: task states come from the jugdir, jobs
 from `.jug_hpc/jobs.json`. Stopping and starting it again is safe.

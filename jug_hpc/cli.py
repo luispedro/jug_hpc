@@ -44,7 +44,8 @@ def build_parser():
             'Submit workers for every resource class as its tasks become '
             'ready, and keep polling (counting the tasks and asking the '
             'scheduler about the workers) until every task is finished, or '
-            'no task can run because some failed. Each class gets at most '
+            'no task can run because some failed (then the workers still '
+            'queued or running are cancelled). Each class gets at most '
             'min(ready tasks, workers) queued or running workers. Only one '
             'submitter may run per project. Worker scripts are kept in '
             '.jug_hpc/scripts/. With --all, every class is submitted at '
@@ -447,6 +448,11 @@ def _poll(args, start):
         if summary != last[0]:
             _log(summary)
             last[0] = summary
+        for kind, message in _cancelled_messages(result):
+            if kind == 'log':
+                _log(message)
+            else:
+                _message(kind, message)
 
     def on_failure(e):
         _message('warning', f'{e} (trying again in {interval:g} s)')
@@ -476,6 +482,20 @@ def _poll(args, start):
     if killed:
         _message('warning', f'jobs killed by the scheduler: {_kills_by_class(killed)}')
     return _report_end(result.report, _relative(project.logs, project_dir))
+
+
+def _cancelled_messages(result):
+    '''Messages about the workers cancelled because no task can run, as
+    ``(kind, message)`` pairs (``kind`` is ``'log'`` for a line on stdout)'''
+    from .cancel import describe_status
+    messages = [('log', (f'{record.class_name}: cancelled job {record.job_id} '
+                         f'({describe_status(record, status)}): no task can run'))
+                for record, status in result.cancelled]
+    if result.cancel_error is not None:
+        message = (f'{result.cancel_error}; the workers still queued or running exit by '
+                   "themselves after a few minutes (or run 'jug-hpc cancel')")
+        messages.append(('warning', message))
+    return messages
 
 
 def _kill_message(record, outcome, project):

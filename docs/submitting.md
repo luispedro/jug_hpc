@@ -64,8 +64,19 @@ It stops:
   failing (exit status 1; see [Workers that keep
   failing](#workers-that-keep-failing)).
 
-Workers that are still queued or running when the submitter stops are left
-alone: a worker with nothing to do exits by itself after a few minutes.
+When it stops because no task can run, the submitter cancels the workers
+that are still queued or running, with a line such as
+
+```
+[2026-11-05 17:20:45] default: cancelled job 2 (4 workers running): no task can run
+```
+
+They have nothing to do (no task is ready or running), but each would keep its
+allocation for about 3 minutes waiting for tasks before giving up, and a queued
+one would still start. If they can't be cancelled (the scheduler can't be
+reached), the submitter prints a warning and stops all the same: run
+`jug-hpc cancel` later, or let them exit by themselves. When every task is
+finished, the workers left exit at once, so they are not cancelled.
 
 ### Workers that keep failing
 
@@ -243,16 +254,18 @@ $ jug-hpc status
 class          waiting  ready  running  failed  finished  queued  running
 [class.align]        0      1        0       0        19       0        0
 [class.merge]        1      0        0       0         0       0        0
-[default]            1      0        0       0        19       0        4
-total                2      1        0       0        38       0        4
+[default]            1      0        0       0        19       0        0
+total                2      1        0       0        38       0        0
 
 Submitter: not running
 jug-hpc: warning: [class.align]: 4 jobs killed for wall time (the last: job 5: killed: wall time limit reached); raise time (now 00:00:05), or lower time_fraction (now 0.8: a task started after 00:00:04 has 00:00:01 left)
+jug-hpc: note: tasks are ready, but no worker is queued or running and no submitter is running: run 'jug-hpc submit'
 ```
 
-The four `default` workers still running have nothing to do: they wait for
-the `count` task that needs the `align` task that keeps being killed, and give
-up after about 3 minutes.
+The submitter cancelled the four `default` workers when it stopped: they were
+waiting for the `count` task that needs the `align` task that keeps being
+killed. The note does not know why the submitter stopped: here, raise `time`
+first.
 
 Notes say when every task is finished, when no task can run because some
 failed, and when tasks are ready but no worker is queued or running and no

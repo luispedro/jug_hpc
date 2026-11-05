@@ -58,6 +58,8 @@ class FakePBS(PBSScheduler):
         self.outcome_queries = []
         self.fail_submit = set()     # classes whose submission fails
         self.fail_query = 0          # number of queries to fail
+        self.fail_cancel = False
+        self.cancelled = []
         self._next = 1000
 
     def submit(self, script, spec):
@@ -79,6 +81,15 @@ class FakePBS(PBSScheduler):
         self.outcome_queries.append(list(jobs))
         return {j: self.outcomes.get(j, JobOutcome(Outcome.SUCCESS, 0)) for j in jobs
                 if j in self.statuses and self.statuses[j].state is JobState.FINISHED}
+
+    def cancel(self, jobs):
+        if self.fail_cancel:
+            raise SchedulerError('pbs: qdel: could not connect to server')
+        self.cancelled.append(list(jobs))
+        for j in jobs:
+            if j in self.statuses:
+                self.statuses[j] = JobStatus(JobState.FINISHED)
+                self.outcomes[j] = JobOutcome(Outcome.CANCELLED, 271)
 
     def finish_all(self):
         for j in self.statuses:
@@ -248,6 +259,97 @@ def test_poll_submits_nothing_when_over(setup, kind):
     assert r.report.progress is (Progress.FINISHED if kind == 'finished' else Progress.BLOCKED)
     assert submitted(r) == []
     assert state.jobs() == []
+
+
+def test_poll_blocked_cancels_idle_workers(setup):
+    '''No task can run: the workers still queued or running are cancelled, not
+    the submitter job nor the jobs that ended'''
+    submitter, counts, sched, state, _ = setup
+    state.add_job('1.pbs', 'align', 'pbs', 2, '.jug_hpc/scripts/align-1.sh')
+    state.add_job('2.pbs', 'default', 'pbs', 1, '.jug_hpc/scripts/default-1.sh')
+    state.add_job('3.pbs', 'submitter', 'pbs', 1, '.jug_hpc/scripts/submitter-1.sh')
+    state.add_job('4.pbs', 'default', 'pbs', 3, '.jug_hpc/scripts/default-2.sh')
+    sched.statuses['1.pbs'] = JobStatus(JobState.RUNNING, running=2)
+    sched.statuses['2.pbs'] = JobStatus(JobState.FINISHED)
+    sched.statuses['3.pbs'] = JobStatus(JobState.RUNNING, running=1)
+    sched.statuses['4.pbs'] = JobStatus(JobState.QUEUED, queued=3)
+    counts.set(LOAD, failed=1, finished=2)
+    counts.set(ALIGN, waiting=3)
+    r = submitter.poll()
+    assert r.report.progress is Progress.BLOCKED
+    assert sched.cancelled == [['1.pbs', '4.pbs']]
+    assert [(rec.job_id, s) for rec, s in r.cancelled] == [
+        ('1.pbs', JobStatus(JobState.RUNNING, running=2)),
+        ('4.pbs', JobStatus(JobState.QUEUED, queued=3))]
+    assert r.cancel_error is None
+    assert r.active == {'align': 2, 'default': 3}
+
+
+def test_poll_finished_leaves_workers(setup):
+    '''Workers exit at once when every task is finished'''
+    submitter, counts, sched, state, _ = setup
+    state.add_job('1.pbs', 'default', 'pbs', 2, '.jug_hpc/scripts/default-1.sh')
+    sched.statuses['1.pbs'] = JobStatus(JobState.RUNNING, running=2)
+    counts.set(LOAD, finished=3)
+    r = submitter.poll()
+    assert r.report.progress is Progress.FINISHED
+    assert sched.cancelled == []
+    assert r.cancelled == []
+
+
+def test_poll_stalled_cancels_other_workers(setup):
+    '''Stalled: the workers of the other classes have nothing to do either'''
+    submitter, counts, sched, state, _ = setup
+    counts.set(LOAD, finished=1)
+    counts.set(ALIGN, ready=3)
+    counts.set(MERGE, waiting=1)
+    for _ in range(MAX_FAILED_JOBS):
+        assert submitted(submitter.poll()) == [('align', 2)]
+        fail_all(sched)
+    # a default worker, submitted by hand, waiting for merge's dependencies
+    state.add_job('99.pbs', 'default', 'pbs', 1, '.jug_hpc/scripts/default-1.sh')
+    sched.statuses['99.pbs'] = JobStatus(JobState.RUNNING, running=1)
+    r = submitter.poll()
+    assert r.report.progress is Progress.STALLED
+    assert sched.cancelled == [['99.pbs']]
+    assert [rec.job_id for rec, _ in r.cancelled] == ['99.pbs']
+
+
+def test_poll_failed_cancel_ends_run(setup):
+    '''A failed cancel is reported, but the run is over all the same'''
+    submitter, counts, sched, state, _ = setup
+    state.add_job('1.pbs', 'align', 'pbs', 2, '.jug_hpc/scripts/align-1.sh')
+    sched.statuses['1.pbs'] = JobStatus(JobState.QUEUED, queued=2)
+    sched.fail_cancel = True
+    counts.set(LOAD, failed=3)
+    counts.set(ALIGN, waiting=3)
+    r = run(submitter, sleep=pytest.fail)
+    assert r.report.progress is Progress.BLOCKED
+    assert r.cancelled == []
+    assert str(r.cancel_error) == 'pbs: qdel: could not connect to server'
+    assert r.errors == []
+
+
+def test_cli_cancelled_messages(setup):
+    from jug_hpc.cli import _cancelled_messages
+    submitter, counts, sched, state, _ = setup
+    state.add_job('1.pbs', 'align', 'pbs', 2, '.jug_hpc/scripts/align-1.sh')
+    state.add_job('2.pbs', 'default', 'pbs', 1, '.jug_hpc/scripts/default-1.sh')
+    sched.statuses['1.pbs'] = JobStatus(JobState.RUNNING, queued=1, running=1)
+    sched.statuses['2.pbs'] = JobStatus(JobState.QUEUED, queued=1)
+    counts.set(LOAD, failed=3)
+    counts.set(ALIGN, waiting=3)
+    assert _cancelled_messages(submitter.poll()) == [
+        ('log', 'align: cancelled job 1.pbs (1 worker queued, 1 running): no task can run'),
+        ('log', 'default: cancelled job 2.pbs (queued): no task can run'),
+    ]
+    sched.statuses['1.pbs'] = JobStatus(JobState.QUEUED, queued=2)
+    sched.fail_cancel = True
+    assert _cancelled_messages(submitter.poll()) == [
+        ('warning', ('pbs: qdel: could not connect to server; the workers still queued or '
+                     "running exit by themselves after a few minutes (or run 'jug-hpc "
+                     "cancel')")),
+    ]
 
 
 def test_poll_failed_submission(setup):
@@ -857,14 +959,20 @@ def middle(x):
 @needs_bash
 def test_cli_submit_blocked(tmp_path, monkeypatch, capsys):
     project_dir, sched = local_project(tmp_path, monkeypatch, FAILING_TASK)
+    start = time.monotonic()
     status = main(['-C', str(project_dir), 'submit', '--interval=0.2'])
     out, err = capsys.readouterr()
     # the middle worker waits for the task whose dependency failed (Jug does
-    # not know it never will run): stop it
-    jobs = [r.job_id for r in ProjectState(project_dir).jobs()]
-    sched.cancel(jobs)
-    wait_for_jobs(sched, jobs)
+    # not know it never will run): the submitter cancels it
+    records = ProjectState(project_dir).jobs()
+    wait_for_jobs(sched, [r.job_id for r in records])
+    assert time.monotonic() - start < 60, out
     assert status == 1, out
+    middle = [r.job_id for r in records if r.class_name == 'middle']
+    lines = [line.split('] ', 1)[1] for line in out.splitlines()]
+    assert lines[-1] == f'middle: cancelled job {middle[-1]} (running): no task can run'
+    outcomes = sched.outcome(middle)
+    assert outcomes[middle[-1]].outcome is Outcome.CANCELLED
     assert err == ('jug-hpc: error: no task can run: failed tasks: [default] 1; '
                    'tasks waiting for them: [class.middle] 1\n'
                    "jug-hpc: note: the worker logs say why the tasks failed; once fixed, "
