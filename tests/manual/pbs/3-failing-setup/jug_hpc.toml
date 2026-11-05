@@ -1,0 +1,8 @@
+# Every worker fails in its setup, before Jug starts. The submitter should
+# stop after 3 failed jobs of the class (needs PBS job history).
+setup = "exit 3; source ../venv/bin/activate"
+
+[default]
+memory  = "1G"
+time    = "00:10:00"
+workers = 1

@@ -1,0 +1,13 @@
+# Results of a run (see README.md); the useful ones go to tests/pbs_output/
+venv/
+recorded/
+run.log
+*/jugfile.jugdata/
+*/.jug_hpc/
+*/logs/
+*/submit.log
+*/check.txt
+1-static/dry-run.txt
+1-static/jug-status.txt
+1-static/classes.txt
+5-exit-status/jhpc-*

@@ -1,0 +1,21 @@
+setup = "source ../venv/bin/activate"
+
+[default]
+memory  = "1G"
+time    = "00:30:00"
+workers = 2
+
+[class.align]
+match   = "align"
+cpus    = 2
+memory  = "2G"
+workers = 4
+
+[class.merge]
+match   = "merge"
+cpus    = 3
+memory  = "3G"
+workers = 1
+
+[submitter]
+time = "02:00:00"

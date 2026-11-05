@@ -11,8 +11,8 @@ before making design-level changes. PLAN.md is the source of truth for what come
 
 Current state: milestones 0–1 are done; milestone 2 is done in code (`schedulers/`,
 `runner.py`, `worker.py`, `script.py`, `selection.py`, `state.py`, `submit.py`,
-`jug-hpc submit --all|--dry-run`; only the manual test on a real PBS cluster is left).
-Milestone 3 is done in code (only the real-PBS checks are left): task counts per class
+`jug-hpc submit --all|--dry-run`; also checked on a real PBS cluster).
+Milestone 3 is done (also checked on a real PBS cluster): task counts per class
 (`jugstate.task_counts`, `classes.counts_by_class`, and `jugstate.subprocess_task_counts`
 for loading in a subprocess), `Scheduler.query()` for PBS and local (a `JobStatus` per job, with
 queued/running worker counts), the submission rule and exit condition (pure functions in
@@ -168,7 +168,10 @@ paths replaced by `/home/me/rnaseq`.
 - `tests/fake_pbs/qsub` is a fake `qsub` (put on `PATH`, state in `$FAKE_PBS_DIR`) that runs
   each job synchronously in a clean, PBS-like environment (or holds it, if a `hold` file
   exists); `tests/fake_pbs/qstat` serves `qstat -f -F json [-x] [-t]` for its jobs.
-  `tests/test_fake_pbs.py` uses them for end-to-end PBS tests. Their header comments document
+  `tests/test_fake_pbs.py` uses them for end-to-end PBS tests. Real `qstat` output, recorded on
+  PBS Professional 2026.1 (names replaced), is in `tests/pbs_output/pbspro-2026.1/`;
+  `tests/manual/pbs/` is the kit that recorded it (`run-everything.sh`, see its README),
+  to be rerun by hand on a real cluster for each release. Their header comments document
   their behaviour. Sample PBS command output for unit tests lives in `tests/pbs_output/`.
   Because of the clean environment, projects there need `setup = "export PATH=<venv
   bin>:$PATH"`, and a job can't run `qsub` itself (`env -i` drops `FAKE_PBS_DIR`), so

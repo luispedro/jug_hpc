@@ -1,0 +1,12 @@
+setup = "source ../venv/bin/activate"
+
+# 3 workers: one array job (-J 1-3)
+[default]
+memory  = "1G"
+time    = "00:20:00"
+workers = 3
+
+# 1 worker: a plain job (no -J)
+[class.single]
+match   = "single"
+workers = 1

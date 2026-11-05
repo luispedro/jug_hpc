@@ -1,0 +1,12 @@
+# Copy to ~/.config/jug_hpc/cluster.toml (the default location: the
+# --as-job test checks that a job finds it there) and edit.
+scheduler = "pbs"
+# account   = "my_project"     # -A, if your site needs one
+# partition = "workq"          # -q, if your site has no default queue
+# setup     = """
+# module load python/3.12
+# """
+
+[pbs]
+# Options every job needs, e.g. a mandatory project (-P), go here:
+directives = ["-P myproject"]
