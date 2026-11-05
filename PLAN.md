@@ -361,7 +361,34 @@ CPUs of the worker that ran them).
 5. Stale locks: when a job is known to be dead, find the locks its tasks left
    behind. Report them, and offer `jug-hpc status --release-stale` (wrapping
    Jug's lock removal) rather than removing them silently. Recommend the
-   `file_keepalive` backend in the docs and in `check`.
+   `file_keepalive` backend in the docs and in `check`. Reporting done in
+   `status` (`status._lock_warnings`). Decisions:
+   - Jug lock files hold `PID ... on HOSTNAME ...` but no job ID, so locks
+     are not tied to jobs. Instead: a class whose tasks are locked (Jug's
+     `running` count) while no worker of the class is queued or running
+     (as `worker_counts`, so an unknown job within `SUBMIT_GRACE` counts
+     as queued) gets a warning. Workers run only their class's tasks, so
+     nothing of jug_hpc can hold those locks. A queued worker suppresses it
+     (it may have started between the query and the count; the scheduler is
+     asked first); so does any active worker of a class no longer in
+     `jug_hpc.toml` (its tasks are counted in other classes).
+   - A `jug execute` run by hand (or with another backend's jobs) is
+     reported too; the warning says so ("unless a 'jug execute' started
+     outside jug-hpc is running it").
+   - Not in the submitter's log yet: it keeps polling (`RUNNING`) while
+     tasks are locked. It could warn once per class when it sees locked
+     tasks with no active worker for two polls in a row.
+   - With `file_keepalive`, Jug counts a dead worker's lock as *failed*
+     after 30 minutes (`is_failed`: mtime older than 30 min), so the run
+     ends `BLOCKED` (and `jug cleanup --failed-only` frees it); before
+     that, `status` reports it as here.
+   - Left: `--release-stale`. Jug has no CLI to remove one task's lock
+     (`jug cleanup --locks-only` removes all, failed ones included), so it
+     needs a `jugstate` subprocess command that loads the jugfile and, for
+     the tasks of the given names, calls `store.getlock(hash).release()`
+     when `is_locked()` and not `is_failed()`. Order to avoid releasing a
+     live lock: count (list the locks), then query the scheduler again, and
+     release only in classes that still have no queued or running worker.
 6. Warn in `check` when the jugdir backend can't detect dead workers (plain
    directory, redis) and recommend `file_keepalive:`; decide, with step 5,
    whether it is a note instead, as it would show for most projects.

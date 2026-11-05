@@ -18,6 +18,18 @@ as the scheduler remembers it (without job history, PBS forgets jobs soon after
 they end). Each class gets one warning per way its jobs were killed (memory,
 wall time, signal), with the suggestion of :func:`jug_hpc.kills.suggestion`
 for the class as it is set now.
+
+Tasks that are locked (``running`` in the table) in a class with no queued or
+running worker get a warning: their workers probably died while running them
+(e.g., killed by the scheduler for memory) and left their locks behind, so no
+worker will run them again, and the submitter will not finish (with the
+``file_keepalive`` backend, Jug instead lists such a task as failed after 30
+minutes). The scheduler is asked about the jobs before the tasks are
+counted, so the locks were seen after the workers; a lock taken in between
+(by a worker submitted meanwhile, or by a ``jug execute`` started outside
+jug-hpc) is reported as well, which the warning says. Nothing is reported
+while a class no longer in ``jug_hpc.toml`` has workers queued or running,
+as their tasks are counted in the classes that match them now.
 '''
 from dataclasses import dataclass, field
 
@@ -95,7 +107,8 @@ class StatusReport:
     text : str
         The table and the submitter's line (for stdout)
     warnings : list of str
-        Jobs killed by the scheduler, one per class and way of being killed
+        Jobs killed by the scheduler, one per class and way of being killed;
+        then the classes with locked tasks but no workers
     notes : list of str
         Informational: the run is over, tasks are ready with nobody to run
         them, jobs of another backend were not asked about, ...
@@ -192,6 +205,8 @@ def status(project, by_class, hit_barrier, records, statuses, outcomes, now, *,
 
     ended = [(r, outcomes[r.job_id]) for r in workers_jobs if r.job_id in outcomes]
     warnings = _kill_warnings(project, scheduler_kills(ended))
+    if not unknown:
+        warnings.extend(_lock_warnings(by_class, workers))
     return StatusReport('\n'.join(lines), warnings, notes)
 
 
@@ -214,6 +229,25 @@ def _kill_warnings(project, kills):
                        f'{record.job_id}: {what})')
             advice = suggestion(outcome, rc) if rc is not None else ''
             warnings.append(f'{message}; {advice}' if advice else message)
+    return warnings
+
+
+def _lock_warnings(by_class, workers):
+    '''Locked tasks of classes without workers (see the module docstring)'''
+    warnings = []
+    for name, tc in by_class.items():
+        if tc.running and not workers.get(name, WorkerCounts()).active:
+            if tc.running == 1:
+                what, it, workers_that, its_locks = '1 task is', 'it', 'worker that', 'its lock'
+            else:
+                what, it, workers_that, its_locks = (f'{tc.running} tasks are', 'them',
+                                                     'workers that', 'their locks')
+            warnings.append(
+                f'{_label(name)}: {what} locked, but no worker of the class is queued or '
+                f"running: unless a 'jug execute' started outside jug-hpc is running {it}, "
+                f'the {workers_that} locked {it} died (e.g., killed by the scheduler) and '
+                f'left {its_locks} behind, so no worker will run {it} and the submitter '
+                'will not finish')
     return warnings
 
 

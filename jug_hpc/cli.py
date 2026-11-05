@@ -65,7 +65,9 @@ def build_parser():
             'running workers (asking the scheduler about the jobs recorded in '
             '.jug_hpc/jobs.json), and whether a submitter is running. Jobs that '
             'the scheduler killed (for memory, wall time or by a signal) are '
-            'warnings, with what to change in jug_hpc.toml.'))
+            'warnings, with what to change in jug_hpc.toml, and so are tasks '
+            'locked in a class with no worker queued or running (locks left behind '
+            'by workers that died).'))
     commands.add_parser(
         'cancel',
         help='cancel every queued or running job of the project',

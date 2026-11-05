@@ -267,6 +267,19 @@ waiting for the `count` task that needs the `align` task that keeps being
 killed. The note does not know why the submitter stopped: here, raise `time`
 first.
 
+Tasks that are locked (counted as running) in a class with no worker queued
+or running are a warning too. Their workers died while running them (a worker
+killed with `SIGKILL`, for example for exceeding its memory, can't release its
+task's lock), or someone runs them with `jug execute` outside jug-hpc. Here,
+after a worker was killed in the middle of a task:
+
+```
+jug-hpc: warning: [default]: 1 job killed by a signal (the last: job 1: killed by SIGKILL); if it used more memory than requested, raise memory (now 1G)
+jug-hpc: warning: [default]: 1 task is locked, but no worker of the class is queued or running: unless a 'jug execute' started outside jug-hpc is running it, the worker that locked it died (e.g., killed by the scheduler) and left its lock behind, so no worker will run it and the submitter will not finish
+```
+
+See the limitations below for how to remove such locks.
+
 Notes say when every task is finished, when no task can run because some
 failed, and when tasks are ready but no worker is queued or running and no
 submitter is running (run `jug-hpc submit`). The exit status is 0 unless the
@@ -416,12 +429,12 @@ project's jobs.
 
 jug_hpc is in early development. In particular:
 
-- Locks left behind are not detected yet. A worker killed with `SIGKILL`
-  (for example for exceeding its memory) leaves its task's lock behind (one
-  killed with `SIGTERM`, as for wall time, usually releases it). With a plain
-  jugdir, Jug then counts the task as running forever, so the submitter never
-  finishes (`jug cleanup --locks-only` removes such locks, but only do this
-  when no worker is running). Use the `file_keepalive:` jugdir backend
+- Locks left behind are reported by `jug-hpc status`, but not removed. A
+  worker killed with `SIGKILL` (for example for exceeding its memory) leaves
+  its task's lock behind (one killed with `SIGTERM`, as for wall time, usually
+  releases it). With a plain jugdir, Jug then counts the task as running
+  forever, so the submitter never finishes (`jug cleanup --locks-only` removes
+  such locks, but only do this when no worker is running). Use the `file_keepalive:` jugdir backend
   instead: there, a lock that is not refreshed for 30 minutes counts as
   failed (see the {doc}`faq`).
 - The submitter loads the jugfile at every poll. For jugfiles with millions of

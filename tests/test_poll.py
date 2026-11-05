@@ -1091,6 +1091,41 @@ def test_cli_status(tmp_path, monkeypatch, capsys):
         "backend in use is 'local')")
 
 
+KILLED = '''\
+import os
+import signal
+
+from jug import TaskGenerator
+
+@TaskGenerator
+def die(i):
+    os.kill(os.getpid(), signal.SIGKILL)
+
+die(0)
+'''
+
+
+@needs_bash
+def test_cli_status_stale_lock(tmp_path, monkeypatch, capsys):
+    '''A worker killed while running a task leaves its lock behind'''
+    project_dir, sched = local_project(tmp_path, monkeypatch, KILLED)
+    assert main(['-C', str(project_dir), 'submit', '--all']) == 0
+    wait_for_jobs(sched, [r.job_id for r in ProjectState(project_dir).jobs()])
+    capsys.readouterr()
+    status = main(['-C', str(project_dir), 'status'])
+    out, err = capsys.readouterr()
+    assert status == 0, err
+    assert out.splitlines()[3].split() == ['[default]', '0', '0', '1', '0', '0', '0', '0']
+    assert err.splitlines() == [
+        ('jug-hpc: warning: [default]: 1 job killed by a signal (the last: job 1: killed '
+         'by SIGKILL); if it used more memory than requested, raise memory (now 1G)'),
+        ("jug-hpc: warning: [default]: 1 task is locked, but no worker of the class is "
+         "queued or running: unless a 'jug execute' started outside jug-hpc is running "
+         'it, the worker that locked it died (e.g., killed by the scheduler) and left its '
+         'lock behind, so no worker will run it and the submitter will not finish'),
+    ]
+
+
 def test_cli_status_errors(tmp_path, monkeypatch, capsys):
     status = main(['-C', str(tmp_path), 'status'])
     _, err = capsys.readouterr()

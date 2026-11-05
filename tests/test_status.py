@@ -160,3 +160,37 @@ def test_status_notes(project):
     report = status(project, barrier, True, [], {}, {}, NOW, scheduler_name='pbs')
     assert report.notes == []
     assert '(more tasks will appear after a barrier)' in report.text.splitlines()
+
+
+def test_status_stale_locks(project):
+    by_class = {'big': TaskCounts(running=2, ready=1), 'default': TaskCounts(running=1)}
+    records = [record('1', 'big'), record('2')]
+    statuses = {'1': FINISHED, '2': FINISHED}
+    outcomes = {'1': MEMORY, '2': OK}
+
+    def warnings(records=records, statuses=statuses):
+        return status(project, by_class, False, records, statuses, outcomes, NOW,
+                      scheduler_name='pbs').warnings
+
+    assert warnings() == [
+        ('[class.big]: 1 job killed for memory (the last: job 1: memory limit exceeded); '
+         'raise memory (now 8G)'),
+        ("[class.big]: 2 tasks are locked, but no worker of the class is queued or running: "
+         "unless a 'jug execute' started outside jug-hpc is running them, the workers that "
+         'locked them died (e.g., killed by the scheduler) and left their locks behind, so '
+         'no worker will run them and the submitter will not finish'),
+        ("[default]: 1 task is locked, but no worker of the class is queued or running: "
+         "unless a 'jug execute' started outside jug-hpc is running it, the worker that "
+         'locked it died (e.g., killed by the scheduler) and left its lock behind, so no '
+         'worker will run it and the submitter will not finish'),
+    ]
+
+    # a queued worker (or one just submitted) may have started since it was queried
+    more = [*records, record('3', 'big'), record('4', submitted=NOW - timedelta(seconds=5))]
+    queued = {**statuses, '3': JobStatus(JobState.QUEUED, queued=1), '4': UNKNOWN}
+    assert len(warnings(more, queued)) == 1
+
+    # a worker of a class no longer in jug_hpc.toml may hold the locks
+    more = [*records, record('5', 'old')]
+    running = {**statuses, '5': JobStatus(JobState.RUNNING, running=1)}
+    assert len(warnings(more, running)) == 1

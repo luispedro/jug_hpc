@@ -29,7 +29,8 @@ to report jobs killed by the scheduler in the submitter's log, with what to chan
 (step 4, `kills.py`), and `jug-hpc status` (step 1, `status.py`: tasks and workers per
 class, the submitter, and the kills of every recorded job), and `jug-hpc cancel`
 (step 2, `cancel.py`; PBS `cancel()` with `qdel`), and the submitter cancelling the
-workers left when no task can run (step 7).
+workers left when no task can run (step 7), and `status` warning about locks left by
+dead workers (step 5, reporting only; `--release-stale` not done).
 
 ## Commands
 
@@ -161,7 +162,8 @@ paths replaced by `/home/me/rnaseq`.
   `PollResult.ended` and sums them up per class when the run is over.
 - **`status.py`**: `jug-hpc status`, pure like `check.py`: `worker_counts` (queued/running
   per class, `SUBMIT_GRACE` as in `active_workers`) and `status(...)` → `StatusReport`
-  (table text, kill warnings per class and kind, notes). `cli.cmd_status` reads everything
+  (table text, kill warnings per class and kind, stale-lock warnings for classes with
+  locked tasks but no queued/running worker, notes). `cli.cmd_status` reads everything
   (all jobs of the backend in `jobs.json`, `query` then `outcome`, task counts in a
   subprocess, `ProjectState.submitter_lock_holder()`) and holds no lock.
 - **`cancel.py`**: `jug-hpc cancel`. `cancel(scheduler, project_state, ...)` cancels the
