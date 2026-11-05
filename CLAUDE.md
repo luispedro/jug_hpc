@@ -31,7 +31,8 @@ class, the submitter, and the kills of every recorded job), and `jug-hpc cancel`
 (step 2, `cancel.py`; PBS `cancel()` with `qdel`), and the submitter cancelling the
 workers left when no task can run (step 7), and `status` and the submitter's log
 warning about locks left by dead workers and `status --release-stale` removing them
-(step 5).
+(step 5), and `check` noting jugdirs that can't detect dead workers (step 6,
+`check.dead_worker_note`).
 
 ## Commands
 

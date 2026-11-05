@@ -115,11 +115,15 @@ Jugfile: jugfile.py (41 tasks)
 
 [default]  (20 tasks)
   20  jugfile.count
+jug-hpc: note: Jug's default jugdir (jugfile.jugdata) can't tell a dead worker's lock from a running task: a task whose worker the scheduler kills stays locked until 'jug-hpc status --release-stale' removes the lock (the submitter and 'jug-hpc status' warn about it). With jugdir = "file_keepalive:jugfile.jugdata" (same storage format) in jug_hpc.toml, such a lock counts as failed after 30 minutes
 ```
 
 A task matched by two classes is an error, and a class that matches no task is
 a warning (often a typo in `match`). `check` never reads the cluster settings,
 so you can run it anywhere, including on a laptop.
+
+The note is about the jugdir, where Jug keeps results and locks. It is only a
+note: the project works as it is. {doc}`faq` explains the choice of backend.
 
 ## Step 4: look at the scripts
 

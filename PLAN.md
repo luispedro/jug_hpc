@@ -358,7 +358,7 @@ CPUs of the worker that ran them).
      rule). Fine for a task that never fits, but maybe count only jobs that
      ran no task (would need per-job task counts; not done). Decided
      (2026-11-05): keep the rule as it is for now.
-5. Done (except in `check`, step 6): stale locks. Reported by `status` and
+5. Done: stale locks (`check` notes the jugdirs concerned: step 6). Reported by `status` and
    in the submitter's log (`submitter.locked_without_workers`), removed by
    `jug-hpc status --release-stale`. Decisions:
    - Jug lock files hold `PID ... on HOSTNAME ...` but no job ID, so locks
@@ -400,11 +400,17 @@ CPUs of the worker that ran them).
      (`[class.x]: released the locks of N tasks`), a class that got a
      worker meanwhile is a note. No confirmation prompt; a `jug execute`
      outside jug-hpc loses its locks too (documented).
-6. Warn in `check` when the jugdir backend can't detect dead workers (plain
-   directory, redis) and recommend `file_keepalive:`; decide, with step 5,
-   whether it is a note instead, as it would show for most projects.
-   (`dict_store`, which workers cannot share at all, is already a warning in
-   `check` and an error in `submit`.)
+6. Done: `check` notes a jugdir that can't detect dead workers
+   (`check.dead_worker_note`). Decisions:
+   - A note, not a warning: it shows for most projects (Jug's default
+     jugdir), and nothing breaks (step 5: the submitter and `status` warn,
+     `--release-stale` removes the locks).
+   - Shown for Jug's default jugdir, a plain directory and `redis:`; not for
+     `file_keepalive:` nor `dict_store` (already a warning). It suggests
+     `file_keepalive:` with the same path (same storage format, so an
+     existing jugdir can be switched); for `redis:` a `<directory>`, and the
+     URL is not echoed (it may hold a password).
+   - Only in `check`, not in `submit` (which would repeat it at every run).
 7. Done: when the submitter stops because of failed tasks, cancel the workers
    left waiting for tasks that depend on them: each waits `NR_WAIT_CYCLES ×
    WAIT_CYCLE_TIME` (3 min) before exiting, holding its allocation (and a

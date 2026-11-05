@@ -4,16 +4,24 @@
 :class:`CheckReport`: the listing for stdout (every class with its tasks,
 counted per task name) and the problems found, which the CLI prints on
 stderr. It does no I/O, so it is tested without the CLI.
+
+It also notes when the jugdir cannot tell a dead worker's lock from a running
+task (:func:`dead_worker_note`: Jug's directory and ``redis:`` backends). That
+is a note rather than a warning: it applies to most projects, and nothing
+breaks (the submitter and ``jug-hpc status`` warn about such locks, and
+``jug-hpc status --release-stale`` removes them).
 '''
 from collections import Counter
 from dataclasses import dataclass, field
 
 from .classes import Classifier, classify, selector
-from .config.project import jugdir_problem
+from .config.project import jugdir_problem, split_jugdir
+from .jugstate import default_jugdir
 
 __all__ = [
     'CheckReport',
     'check',
+    'dead_worker_note',
 ]
 
 BARRIER_NOTE = (
@@ -37,7 +45,8 @@ class CheckReport:
         One per class that matches no task, and one if workers cannot share
         the jugdir (``jug-hpc submit`` would refuse it)
     notes : list of str
-        Informational (e.g. the task list stops at a barrier)
+        Informational (the task list stops at a barrier; the jugdir cannot
+        detect dead workers)
     '''
     classification: object
     text: str
@@ -80,6 +89,9 @@ def check(settings, state):
             msg += ' (so far: loading stopped at a barrier)'
         warnings.append(msg)
     notes = [BARRIER_NOTE] if state.hit_barrier else []
+    note = dead_worker_note(settings)
+    if note is not None:
+        notes.append(note)
     return CheckReport(
         classification=c,
         text=_format(settings, state, c, Counter(names)),
@@ -87,6 +99,49 @@ def check(settings, state):
         warnings=warnings,
         notes=notes,
     )
+
+
+def dead_worker_note(settings):
+    '''A note if the project's jugdir keeps the locks of dead workers forever
+
+    With Jug's directory backend (the default) and ``redis:``, the lock of a
+    task whose worker was killed stays until it is removed, so the task looks
+    running. ``file_keepalive:`` (same storage format as a directory) counts a
+    lock that is not refreshed for 30 minutes as failed.
+
+    Parameters
+    ----------
+    settings : ProjectSettings
+
+    Returns
+    -------
+    str or None
+        None for ``file_keepalive:`` and for ``dict_store`` (which
+        :func:`~jug_hpc.config.project.jugdir_problem` reports)
+    '''
+    if settings.jugdir is None:
+        path = default_jugdir(_relative_path(settings.jugfile, settings.project_dir))
+        which = f"Jug's default jugdir ({path})"
+    else:
+        prefix, _ = split_jugdir(settings.jugdir)
+        if prefix == 'redis:':
+            # not echoed: a redis URL may hold a password
+            which, path = "the 'redis:' jugdir", None
+        elif prefix:
+            return None
+        else:
+            path = _relative_path(settings.jugdir, settings.project_dir)
+            which = f'the jugdir ({path})'
+    if path is None:
+        switch = 'With jugdir = "file_keepalive:<directory>"'
+    else:
+        switch = f'With jugdir = "file_keepalive:{path}" (same storage format)'
+    return (
+        f"{which} can't tell a dead worker's lock from a running task: a task "
+        'whose worker the scheduler kills stays locked until '
+        "'jug-hpc status --release-stale' removes the lock (the submitter and "
+        f"'jug-hpc status' warn about it). {switch} in jug_hpc.toml, such a "
+        'lock counts as failed after 30 minutes')
 
 
 def _format(settings, state, c, all_counts):

@@ -159,7 +159,9 @@ def test_check(check_project, capsys, monkeypatch):
     monkeypatch.chdir(check_project / 'sub')
     assert main(['check']) == 0
     out, err = capsys.readouterr()
-    assert err == ''
+    # the only message: the default jugdir keeps dead workers' locks
+    assert err.startswith("jug-hpc: note: Jug's default jugdir (jugfile.jugdata) can't tell")
+    assert len(err.splitlines()) == 1
     assert out.splitlines() == [
         'Jugfile: jugfile.py (3 tasks)',
         '',
@@ -184,7 +186,7 @@ def test_check_overlap(check_project, capsys):
     assert main(['-C', str(check_project), 'check']) == 1
     out, err = capsys.readouterr()
     assert 'Matched by several classes (error)  (1 task)' in out
-    errors = err.splitlines()
+    errors = [x for x in err.splitlines() if not x.startswith('jug-hpc: note: ')]
     assert len(errors) == 2
     assert errors[0].startswith('jug-hpc: warning: ')
     assert '[class.c]' in errors[0]

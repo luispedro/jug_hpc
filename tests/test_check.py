@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from jug_hpc.check import BARRIER_NOTE, check
+from jug_hpc.check import BARRIER_NOTE, check, dead_worker_note
 from jug_hpc.config import load_project_settings
 from jug_hpc.jugstate import load_project
 
@@ -28,7 +28,9 @@ def project(tmp_path):
 def test_simple(project):
     r = project('simple.py', '[class.align]\nmatch = "simple.align_sample"\n')
     assert r.ok
-    assert r.errors == r.warnings == r.notes == []
+    assert r.errors == r.warnings == []
+    assert len(r.notes) == 1
+    assert r.notes[0].startswith("Jug's default jugdir (simple.jugdata) can't tell")
     c = r.classification
     assert c.total('align') == 3
     assert c.total('default') == 4
@@ -83,7 +85,8 @@ def test_unused_class_is_a_warning(project):
 def test_barrier(project, jugfile):
     r = project(jugfile, '[class.proc]\nmatch = "process"\n')
     assert r.ok
-    assert r.notes == [BARRIER_NOTE]
+    assert r.notes[0] == BARRIER_NOTE
+    assert len(r.notes) == 2
     # process() tasks only appear after the barrier
     assert r.classification.total('default') == 1
     assert len(r.warnings) == 1
@@ -143,3 +146,38 @@ def test_shareable_jugdir_no_warning(tmp_path, jugdir):
     settings = load_project_settings(tmp_path)
     r = check(settings, load_project(settings))
     assert r.warnings == []
+
+
+def _settings(tmp_path, top=''):
+    (tmp_path / 'jug_hpc.toml').write_text(f'jugfile = "sub/pipeline.py"\n{top}{DEFAULT}')
+    return load_project_settings(tmp_path)
+
+
+def test_dead_worker_note_default_jugdir(tmp_path):
+    note = dead_worker_note(_settings(tmp_path))
+    assert note == (
+        "Jug's default jugdir (sub/pipeline.jugdata) can't tell a dead worker's lock "
+        'from a running task: a task whose worker the scheduler kills stays locked '
+        "until 'jug-hpc status --release-stale' removes the lock (the submitter and "
+        "'jug-hpc status' warn about it). With jugdir = "
+        '"file_keepalive:sub/pipeline.jugdata" (same storage format) in jug_hpc.toml, '
+        'such a lock counts as failed after 30 minutes')
+
+
+def test_dead_worker_note_directory(tmp_path):
+    note = dead_worker_note(_settings(tmp_path, 'jugdir = "data/x.jugdata"\n'))
+    assert note.startswith("the jugdir (data/x.jugdata) can't tell")
+    assert 'jugdir = "file_keepalive:data/x.jugdata" (same storage format)' in note
+
+
+def test_dead_worker_note_redis(tmp_path):
+    url = 'redis://:secret@host:6379/'
+    note = dead_worker_note(_settings(tmp_path, f'jugdir = "{url}"\n'))
+    assert note.startswith("the 'redis:' jugdir can't tell")
+    assert 'secret' not in note
+    assert 'jugdir = "file_keepalive:<directory>" in jug_hpc.toml' in note
+
+
+@pytest.mark.parametrize('jugdir', ['file_keepalive:data', 'dict_store', 'dict_store:x.pkl'])
+def test_no_dead_worker_note(tmp_path, jugdir):
+    assert dead_worker_note(_settings(tmp_path, f'jugdir = "{jugdir}"\n')) is None

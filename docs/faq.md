@@ -26,6 +26,9 @@ a lock that hasn't been refreshed for 30 minutes counts as failed. `jug
 cleanup --failed-only` then removes it, so the task can run again. See Jug's
 [backends documentation](https://jug.readthedocs.io/en/latest/backends.html).
 
+`jug-hpc check` adds a note when the jugdir can't detect dead workers: Jug's
+default, any plain directory, and `redis:`.
+
 ## How do I choose `time_fraction`?
 
 Workers stop taking new tasks once they have run for `time_fraction × time`.
