@@ -55,11 +55,16 @@ command with ``-t``, which also lists an array's elements (``1234[1].server``,
 ...), each with its own ``Exit_status``. Its meaning (PBS Professional
 reference guide, "Job exit status"):
 
-- ``0``: success; ``1``--``255``: the exit status of the job script (``128 +
-  N`` if the shell saw a command killed by signal ``N``);
+- ``0``: success; ``1``--``255``: the exit status of the job script;
 - ``256`` or more: the job script was killed by signal ``Exit_status % 256``;
 - negative: PBS's own codes (:data:`PBS_EXIT_CODES`), e.g. ``-27`` and ``-29``
   when PBS killed the job for exceeding its memory or wall time.
+
+A status of ``128 + N`` (up to ``128 + 64``) is taken as a kill by signal
+``N``: the worker script ``exec``\\ s ``jug``, so the job's status is Jug's, and
+this is how the shell (and PBS, on the clusters checked) reports a process
+killed by a signal. A ``qdel`` leaves the job in ``substate`` 91
+(:data:`SUBSTATE_TERMINATED`; 92 is finished, 93 failed), whatever its status.
 
 As a wall time kill often shows as a plain ``SIGTERM``/``SIGKILL`` (``271``,
 ``265``), a job that did not succeed and used at least its requested
@@ -67,13 +72,20 @@ As a wall time kill often shows as a plain ``SIGTERM``/``SIGKILL`` (``271``,
 for wall time. An array job without listed elements falls back to the array's
 own ``Exit_status`` (0: every element succeeded; 1: some element failed; 2:
 some element was deleted or PBS failed). An array job's outcome is that of its
-worst element (:func:`~.base.combine_outcomes`). These codes are taken from
-the documentation and OpenPBS's sources, not yet checked on a real cluster.
+worst element (:func:`~.base.combine_outcomes`).
+
+Checked on PBS Professional 2026.1 with cgroups (``tests/pbs_output/pbspro-2026.1/``):
+a wall time kill is ``-29``; a ``qdel`` of a running job is ``143`` with
+substate 91; a job over its memory is killed by the cgroup's OOM killer, which
+PBS shows only as ``137`` (SIGKILL), so it is reported as a SIGKILL that is
+probably a memory kill. ``Exit_status`` may be an integer or a string
+(``"-29"``). The other codes are from the documentation and OpenPBS's sources.
 '''
 import difflib
 import json
 import os
 import re
+import signal
 from collections import defaultdict
 
 from ..config.errors import ConfigError
@@ -100,6 +112,7 @@ __all__ = [
     'QSTAT_TIMEOUT',
     'RAW_KEYS',
     'SCRIPT_VARS',
+    'SUBSTATE_TERMINATED',
     'PBSScheduler',
     'array_exit_outcome',
     'element_outcome',
@@ -183,6 +196,10 @@ PBS_EXIT_CODES = {
     -28: (Outcome.KILLED_SIGNAL, 'killed by PBS: CPU time limit exceeded'),
     -29: (Outcome.KILLED_TIME, 'killed by PBS: wall time limit exceeded'),
 }
+
+#: ``substate`` of a finished job that was deleted with ``qdel`` (OpenPBS's
+#: ``JOB_SUBSTATE_TERMINATED``)
+SUBSTATE_TERMINATED = 91
 
 #: Jobs per ``qstat`` call
 QSTAT_BATCH = 100
@@ -450,13 +467,27 @@ def _resource(attrs, table, name):
     return value.get(name) if isinstance(value, dict) else None
 
 
+def _int_attr(attrs, name):
+    '''Attribute ``name`` as an int (qstat writes some as strings), or None'''
+    value = attrs.get(name)
+    if isinstance(value, str) and re.fullmatch(r'\s*-?\d+\s*', value):
+        return int(value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
 def _exit_status(attrs):
     '''``Exit_status`` as an int, or None'''
-    status = attrs.get('Exit_status')
-    if isinstance(status, str) and re.fullmatch(r'\s*-?\d+\s*', status):
-        return int(status)
-    if isinstance(status, int) and not isinstance(status, bool):
-        return status
+    return _int_attr(attrs, 'Exit_status')
+
+
+def _killed_by(status):
+    '''The signal that killed a job with (positive) ``Exit_status`` ``status``, or None'''
+    if status >= 256:
+        return status % 256
+    if 128 < status <= 128 + 64:
+        return status - 128
     return None
 
 
@@ -466,8 +497,9 @@ def element_outcome(attrs, limits=None):
     Parameters
     ----------
     attrs : dict
-        Its attributes in ``qstat -f -F json -x``: ``Exit_status``, and
-        ``resources_used`` and ``Resource_List`` (for wall time kills)
+        Its attributes in ``qstat -f -F json -x``: ``Exit_status``,
+        ``substate`` (for deleted jobs), and ``resources_used`` and
+        ``Resource_List`` (for wall time kills, and memory use)
     limits : dict, optional
         The array job's ``Resource_List``, for an element that lists none
 
@@ -481,32 +513,38 @@ def element_outcome(attrs, limits=None):
                           detail='no exit status (deleted before it started?)')
     if status == 0:
         return JobOutcome(Outcome.SUCCESS, 0)
+    signum = _killed_by(status) if status > 0 else None
+    if _int_attr(attrs, 'substate') == SUBSTATE_TERMINATED:
+        return JobOutcome(Outcome.KILLED_SIGNAL, status, signum,
+                          f'deleted with qdel (Exit_status {status})')
     if status < 0:
         outcome, what = PBS_EXIT_CODES.get(status, (Outcome.FAILED, 'PBS error'))
-        result = JobOutcome(outcome, status, None, f'{what} (Exit_status {status})')
-    elif status >= 256:
-        signum = status % 256
-        detail = f'killed by {signal_name(signum)} (Exit_status {status})'
-        used_mem = _resource(attrs, 'resources_used', 'mem')
-        mem = _resource(attrs, 'Resource_List', 'mem') or (limits or {}).get('mem')
-        if used_mem and mem:
-            detail += f'; memory used: {used_mem} of {mem}'
-        result = JobOutcome(Outcome.KILLED_SIGNAL, status, signum, detail)
+        cause = f'{what} (Exit_status {status})'
+        if outcome in (Outcome.KILLED_MEMORY, Outcome.KILLED_TIME):
+            return JobOutcome(outcome, status, None, cause)
+    elif signum is not None:
+        outcome, cause = (Outcome.KILLED_SIGNAL,
+                          f'killed by {signal_name(signum)} (Exit_status {status})')
     else:
-        detail = f'exit status {status}'
-        if 128 < status <= 128 + 64:
-            detail += f' (128 + {signal_name(status - 128)})'
-        result = JobOutcome(Outcome.FAILED, status, None, detail)
-    if result.outcome in (Outcome.KILLED_MEMORY, Outcome.KILLED_TIME):
-        return result
+        outcome, cause = Outcome.FAILED, f'exit status {status}'
     used = _resource(attrs, 'resources_used', 'walltime')
     limit = _resource(attrs, 'Resource_List', 'walltime') or (limits or {}).get('walltime')
     used_s, limit_s = _seconds(used), _seconds(limit)
     if used_s is not None and limit_s is not None and used_s >= limit_s:
-        return JobOutcome(Outcome.KILLED_TIME, status, result.signal,
-                          f'wall time limit reached (used {used} of {limit}); '
-                          f'{result.detail}')
-    return result
+        return JobOutcome(Outcome.KILLED_TIME, status, signum,
+                          f'wall time limit reached (used {used} of {limit}); {cause}')
+    if outcome is Outcome.KILLED_SIGNAL:
+        used_mem = _resource(attrs, 'resources_used', 'mem')
+        mem = _resource(attrs, 'Resource_List', 'mem') or (limits or {}).get('mem')
+        if signum == signal.SIGKILL:
+            # cgroup OOM kills show only as SIGKILL; memory use is sampled, so
+            # the last measurement may be well below the limit
+            cause += ', probably for using more memory than requested'
+            if used_mem and mem:
+                cause += f' (last measured use: {used_mem} of {mem})'
+        elif used_mem and mem:
+            cause += f'; memory used: {used_mem} of {mem}'
+    return JobOutcome(outcome, status, signum, cause)
 
 
 def array_exit_outcome(attrs):

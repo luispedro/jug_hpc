@@ -17,8 +17,9 @@ The PBS backend supports OpenPBS and PBS Professional. Torque's `qsub` and
 `qstat` are different and are not supported.
 
 ```{note}
-The PBS backend has not yet been tested on a real PBS cluster, only against a
-simulated `qsub`/`qstat`. Please report any problem.
+The PBS backend has been tested on one PBS Professional cluster (version
+2026.1, with cgroups), besides a simulated `qsub`/`qstat` in the tests. Please
+report any problem, especially with other versions or with OpenPBS.
 ```
 
 ### Job scripts
@@ -51,6 +52,23 @@ with their own `Exit_status`); a job whose workers keep failing stops the
 submissions for its class (see {doc}`submitting`). This needs the PBS server
 to keep job history (`job_history_enable`); without it, a finished job is
 simply gone, and how it ended is not known.
+
+How a job ended is read from its `Exit_status` (and `substate`):
+
+| PBS reports | jug_hpc reports |
+|---|---|
+| `0` | success |
+| `-29`, or a job that used all of its `walltime` | killed for wall time |
+| `-27`, `-26` | killed for memory |
+| `128 + N` or `256 + N` | killed by signal `N` |
+| `137` or `265` (SIGKILL) | killed by SIGKILL, *probably for using more memory than requested* |
+| substate 91 | deleted with `qdel` |
+| other values | failed, with that exit status |
+
+The SIGKILL case is a guess: on clusters that enforce memory limits with
+cgroups, a job that uses too much memory is killed by the kernel, and PBS
+records nothing but the SIGKILL (the job's PBS output file, in
+`logs/scheduler/`, may say more).
 
 ### Raw options
 
@@ -90,6 +108,17 @@ instead: the worker script relies on them for `JUG_HPC_CPUS` and
 `JUG_MAX_SECONDS`.
 
 When a class and the cluster both set the same key, the class's value wins.
+
+Options that every job on a cluster needs, such as a project with `-P`, go in
+`cluster.toml`:
+
+```toml
+[pbs]
+directives = ["-P my_project"]
+```
+
+As a class's `directives` replace the cluster's, a class that sets its own
+must repeat them.
 
 (local-backend)=
 ## Local

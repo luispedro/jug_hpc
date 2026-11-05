@@ -48,8 +48,10 @@ from jug_hpc.worker import WorkerSpec, make_worker_spec
 
 GOLDEN = Path(__file__).parent / 'golden' / 'pbs'
 
-# Output of qstat -f -F json, in the format of OpenPBS 23 (not yet recorded on
-# a real cluster; replace with real output when the backend is tested on one)
+# Output of qstat -f -F json, modelled on OpenPBS 23 (not recorded): it covers
+# what the recordings in pbs_output/pbspro-2026.1/ (see RECORDED) do not, such
+# as PBS's memory kills (-27), signal kills as 256 + N, and unescaped control
+# characters (older PBS versions)
 QSTAT_JSON = (Path(__file__).parent / 'pbs_output' / 'qstat-f-json.json').read_text()
 # ... and of qstat -f -F json -x -t, with array elements and exit statuses
 QSTAT_XT_JSON = (Path(__file__).parent / 'pbs_output' / 'qstat-f-json-xt.json').read_text()
@@ -333,7 +335,8 @@ QSTAT_OUTCOMES = {
         'killed by SIGTERM (Exit_status 271)'),
     '2005.pbs01.example.org': JobOutcome(
         Outcome.KILLED_SIGNAL, 265, 9,
-        'killed by SIGKILL (Exit_status 265); memory used: 16252928kb of 16gb'),
+        'killed by SIGKILL (Exit_status 265), probably for using more memory than requested '
+        '(last measured use: 16252928kb of 16gb)'),
     '2007[].pbs01.example.org': JobOutcome(
         Outcome.KILLED_TIME, -29, None,
         '2 of 3 workers did not succeed ('
@@ -365,8 +368,26 @@ def test_parse_qstat_outcomes_fails():
     ({'Exit_status': 0}, SUCCESS),
     ({'Exit_status': '0'}, SUCCESS),
     ({'Exit_status': 1}, JobOutcome(Outcome.FAILED, 1, None, 'exit status 1')),
-    ({'Exit_status': 137}, JobOutcome(Outcome.FAILED, 137, None,
-                                      'exit status 137 (128 + SIGKILL)')),
+    # 128 + N: killed by signal N (the worker script execs jug)
+    ({'Exit_status': 137}, JobOutcome(Outcome.KILLED_SIGNAL, 137, 9,
+                                      'killed by SIGKILL (Exit_status 137), probably for '
+                                      'using more memory than requested')),
+    ({'Exit_status': 143, 'resources_used': {'mem': '1kb'}, 'Resource_List': {'mem': '1gb'}},
+     JobOutcome(Outcome.KILLED_SIGNAL, 143, 15,
+                'killed by SIGTERM (Exit_status 143); memory used: 1kb of 1gb')),
+    ({'Exit_status': 128}, JobOutcome(Outcome.FAILED, 128, None, 'exit status 128')),
+    ({'Exit_status': 193}, JobOutcome(Outcome.FAILED, 193, None, 'exit status 193')),
+    # deleted with qdel (substate 91), whatever the exit status
+    ({'Exit_status': 143, 'substate': 91},
+     JobOutcome(Outcome.KILLED_SIGNAL, 143, 15, 'deleted with qdel (Exit_status 143)')),
+    ({'Exit_status': 271, 'substate': '91'},
+     JobOutcome(Outcome.KILLED_SIGNAL, 271, 15, 'deleted with qdel (Exit_status 271)')),
+    ({'Exit_status': 3, 'substate': 93}, JobOutcome(Outcome.FAILED, 3, None, 'exit status 3')),
+    # a SIGKILL at the wall time limit is a wall time kill, not a memory one
+    ({'Exit_status': 137, 'resources_used': {'walltime': '01:00:00'},
+      'Resource_List': {'walltime': '01:00:00'}},
+     JobOutcome(Outcome.KILLED_TIME, 137, 9, 'wall time limit reached (used 01:00:00 of '
+                '01:00:00); killed by SIGKILL (Exit_status 137)')),
     ({'Exit_status': 271}, JobOutcome(Outcome.KILLED_SIGNAL, 271, 15,
                                       'killed by SIGTERM (Exit_status 271)')),
     ({'Exit_status': -29}, JobOutcome(Outcome.KILLED_TIME, -29, None,
@@ -429,6 +450,82 @@ def test_outcome_fails():
     runner = FakeRunner().on('qstat', returncode=2, stderr='qstat: cannot connect\n')
     with pytest.raises(SchedulerError, match='pbs: could not query jobs: (?s:.*)cannot connect'):
         PBSScheduler(CLUSTER, runner).outcome(['1.s'])
+
+
+# --- recorded on a real cluster -------------------------------------------------------
+# PBS Professional 2026.1 with cgroups, recorded by tests/manual/pbs/run-everything.sh
+# (see the README there; user, host and project names replaced). For an unknown job,
+# qstat printed 'qstat: Unknown Job Id 99999999.aqua' and exited with 153.
+
+RECORDED = Path(__file__).parent / 'pbs_output' / 'pbspro-2026.1'
+RECORDED_UNKNOWN = 'qstat: Unknown Job Id 99999999.aqua\n'
+
+
+def recorded(name):
+    return (RECORDED / name).read_text()
+
+
+@pytest.mark.parametrize('name, expected', [
+    # 1-static: a plain job and an array of 3, queued, running, then finished
+    ('qstat-x-queued.json', {'27666324.aqua': JobStatus(QUEUED, queued=1),
+                             '27666325[].aqua': JobStatus(QUEUED, queued=3)}),
+    ('qstat-x-running.json', {'27666324.aqua': JobStatus(RUNNING, running=1),
+                              '27666325[].aqua': JobStatus(RUNNING, running=3)}),
+    ('qstat-x-finished.json', {'27666324.aqua': JobStatus(FINISHED),
+                               '27666325[].aqua': JobStatus(FINISHED)}),
+    ('qstat-x-mixed.json', {'27666324.aqua': JobStatus(FINISHED)}),
+    ('qstat-x-unknown.json', {}),
+])
+def test_recorded_qstat_output(name, expected):
+    assert parse_qstat_output(recorded(name)) == expected
+
+
+def test_recorded_query_unknown():
+    '''A known and an unknown job in one call: qstat lists the known one and fails'''
+    runner = FakeRunner().on('qstat', returncode=153, stdout=recorded('qstat-x-mixed.json'),
+                             stderr=RECORDED_UNKNOWN)
+    pbs = PBSScheduler(CLUSTER, runner)
+    assert pbs.query([JobId('27666324.aqua'), JobId('99999999.aqua')]) == {
+        '27666324.aqua': JobStatus(FINISHED), '99999999.aqua': JobStatus(UNKNOWN)}
+    runner = FakeRunner().on('qstat', returncode=153, stdout=recorded('qstat-x-unknown.json'),
+                             stderr=RECORDED_UNKNOWN)
+    pbs = PBSScheduler(CLUSTER, runner)
+    assert pbs.query([JobId('99999999.aqua')]) == {'99999999.aqua': JobStatus(UNKNOWN)}
+    assert pbs.outcome([JobId('99999999.aqua')]) == {}
+
+
+EXIT_3 = JobOutcome(Outcome.FAILED, 3, None, 'exit status 3')
+
+
+@pytest.mark.parametrize('name, expected', [
+    ('qstat-xt-running.json', {}),
+    ('qstat-xt-finished.json', {'27666324.aqua': SUCCESS, '27666325[].aqua': SUCCESS}),
+    # without -t, the finished array has its own Exit_status 0
+    ('qstat-x-finished.json', {'27666324.aqua': SUCCESS, '27666325[].aqua': SUCCESS}),
+    # 5-exit-status
+    ('qstat-xt-ok.json', {'27677406.aqua': SUCCESS}),
+    ('qstat-xt-exit3.json', {'27677408.aqua': EXIT_3}),
+    ('qstat-xt-mem.json', {'27677409.aqua': JobOutcome(
+        Outcome.KILLED_SIGNAL, 137, 9,
+        'killed by SIGKILL (Exit_status 137), probably for using more memory than requested '
+        '(last measured use: 446448kb of 1gb)')}),
+    # Exit_status is the string "-29" here
+    ('qstat-xt-walltime.json', {'27677410.aqua': JobOutcome(
+        Outcome.KILLED_TIME, -29, None,
+        'killed by PBS: wall time limit exceeded (Exit_status -29)')}),
+    ('qstat-xt-qdel.json', {'27677413.aqua': JobOutcome(
+        Outcome.KILLED_SIGNAL, 143, 15, 'deleted with qdel (Exit_status 143)')}),
+    ('qstat-xt-array.json', {'27677414[].aqua': JobOutcome(
+        Outcome.KILLED_SIGNAL, 143, 15,
+        '2 of 3 workers did not succeed (worker 2: exit status 3; '
+        'worker 3: deleted with qdel (Exit_status 143))')}),
+    ('qstat-xt-array-ok.json', {'27677412[].aqua': SUCCESS}),
+    # 3-failing-setup: setup = "exit 3; ..."
+    ('qstat-xt-failing-setup.json', {'27668263.aqua': EXIT_3, '27668695.aqua': EXIT_3,
+                                     '27669621.aqua': EXIT_3}),
+])
+def test_recorded_qstat_outcomes(name, expected):
+    assert parse_qstat_outcomes(recorded(name)) == expected
 
 
 @pytest.mark.parametrize('raw', [

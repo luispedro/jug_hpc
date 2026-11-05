@@ -116,16 +116,24 @@ The job header, arrays, memory units and the three raw-option keys
 `docs/schedulers.md`, and in full in `pbs.py`'s docstring. For development:
 
 - Workers = 1 is a plain job, as some PBS installations reject single-element
-  arrays; to be checked on a real cluster.
+  arrays (plain jobs and arrays both checked on PBS Professional 2026.1).
 - Queue state: `qstat -f -F json -x JOB...`. Torque's `qstat` is different;
   Torque support is out of scope for 1.0 but must be possible as a separate
   backend.
 - Job outcome: PBS `Exit_status`, where negative values are PBS's own codes
   (including walltime and memory kills, `pbs.PBS_EXIT_CODES`) and values of
-  256 or more mean "killed by signal `Exit_status % 256`". A failed job that
-  used at least its requested walltime counts as a wall-time kill. The codes
-  are taken from the PBS documentation and OpenPBS's `job.h`; still to be
-  checked on a real cluster (milestone 3, item 7).
+  256 or more, or 128 + N, mean "killed by signal N". `substate` 91 means
+  deleted with `qdel`. A failed job that used at least its requested walltime
+  counts as a wall-time kill. Checked on PBS Professional 2026.1 with cgroups
+  (2026-11-05, recordings in `tests/pbs_output/pbspro-2026.1/`): wall time
+  kills are `-29`; `qdel` gives `143` with substate 91; a job over its memory
+  is killed by the cgroup OOM killer and shows only as `137`, which is
+  reported as SIGKILL "probably for using more memory than requested"
+  (KILLED_SIGNAL, not KILLED_MEMORY: nothing in `qstat` confirms it; only
+  the job's PBS output file says `cgroup/OOM: Killed because of memory
+  limit`). `Exit_status` can be a string (`"-29"`). The modelled files
+  (`qstat-f-json*.json`) stay for cases not seen there (-27, 256 + N,
+  unescaped control characters).
 
 The rest (what raw tables may set, the job-ID expression, `-o`/`-e` paths,
 `qstat` error handling) is in `pbs.py`'s docstring.
@@ -183,9 +191,10 @@ nothing has been pushed to `origin`, so CI has never run.
 
 Done in code: the scheduler interface and registry, runner, worker script,
 PBS and local backends, `.jug_hpc/` state, `submit --dry-run|--all`, and a
-fake `qsub`. Left: the manual test on a real PBS cluster. Things to check
-there: that a directory is accepted for `-o`/`-e`, that single-element arrays
-are avoided correctly, and the `qsub` output format.
+fake `qsub`. Checked on a real PBS cluster (PBS Professional 2026.1,
+2026-11-05, with `tests/manual/pbs/`): a directory is accepted for `-o`/`-e`,
+plain jobs and arrays run, `qsub` prints `27666324.aqua` / `27666325[].aqua`,
+and `--dry-run` output submitted by hand runs to completion. Done.
 
 **Done when:** `--dry-run` output can be submitted by hand on a real PBS
 cluster and runs a one-class jugfile to completion. → **Release 0.1.**
@@ -241,7 +250,10 @@ Remaining:
    - Should `submit --all` refuse to run while the submitter lock is held?
      (It does not take the lock now.)
    - Show the jugfile's own output (`PollResult.output`) on the first poll?
-7. To check on a real PBS cluster (with milestone 2's test):
+7. Checked on a real PBS cluster (PBS Professional 2026.1, 2026-11-05, with
+   `tests/manual/pbs/run-everything.sh`; all passed, outcome parsing fixed as
+   described under "PBS specifics"; unknown jobs: exit status 153 and
+   `qstat: Unknown Job Id <id>`, known jobs still listed). The checklist:
    - record real `qstat -f -F json -x` output (plain job and array; queued,
      running and finished; an unknown ID) into `tests/pbs_output/`, replacing
      `qstat-f-json.json`, which is modelled on OpenPBS 23, not recorded. Check
@@ -264,6 +276,8 @@ Remaining:
 completion on the local backend and on a real PBS cluster from a single
 `jug-hpc submit`, and no worker waits more than a few minutes for
 dependencies. → **Release 0.2.**
+Real PBS: done (2026-11-05; each worker started its first task within 4 s of
+starting, with plain `submit` and with `--as-job`).
 Local backend: done (`tests/test_poll.py::test_cli_submit_runs_three_classes`,
 a default → align → merge → default chain whose tasks record the class and
 CPUs of the worker that ran them).
