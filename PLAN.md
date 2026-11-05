@@ -333,7 +333,8 @@ CPUs of the worker that ran them).
      for wall time counts towards `MAX_FAILED_JOBS` when no task of the class
      ended between the poll before and the one that sees it end (step 8
      rule). Fine for a task that never fits, but maybe count only jobs that
-     ran no task (would need per-job task counts; not done).
+     ran no task (would need per-job task counts; not done). Decided
+     (2026-11-05): keep the rule as it is for now.
 5. Stale locks: when a job is known to be dead, find the locks its tasks left
    behind. Report them, and offer `jug-hpc status --release-stale` (wrapping
    Jug's lock removal) rather than removing them silently. Recommend the
