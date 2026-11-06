@@ -90,9 +90,9 @@ keeps the deleted jobs' history. ``qdel`` exits with an error when some job
 has already finished or is unknown; its messages about those (``Unknown Job
 Id``, ``Job has finished``) are ignored, as in ``qstat``'s output. Recorded on
 PBS Professional 2026.1: ``qdel: Job has finished 1234.server``, exit status
-35. Given a finished job and then an unknown one, it printed only that line;
-whether ``qdel`` goes on to the jobs after one it cannot delete is not known
-yet.
+35; ``qdel FINISHED QUEUED`` still deletes the queued job, so one call does
+not stop at a job that has just ended. (Given a finished job and then an
+unknown one, it printed only the line about the finished job.)
 '''
 import difflib
 import json

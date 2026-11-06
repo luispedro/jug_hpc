@@ -494,10 +494,9 @@ step 7 (memory and wall-time kills, the stale lock, `--release-stale`, the
 fix), step 8 (step 7 above), and step 6 (`jug-hpc cancel` of a running
 submitter job and running workers; the `qdel` message for a finished job,
 recorded, is the one ignored). Recordings in `tests/pbs_output/pbspro-2026.1/`.
-Open: given a finished job and then an unknown one, `qdel` printed a message
-only for the first. If it stops at the first job it cannot delete, a
-`jug-hpc cancel` racing a job that just ended would leave the later jobs of
-its batch alone; check by hand (`qdel <finished> <queued>`).
+Checked by hand afterwards: `qdel <finished> <queued>` prints `Job has
+finished`, exits 35 and still deletes the queued job, so a `jug-hpc cancel`
+racing a job that just ended still cancels the rest of its batch.
 
 ### Milestone 5: second scheduler and 1.0
 
