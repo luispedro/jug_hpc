@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -228,6 +229,20 @@ def test_failing_jobs():
     assert failing_jobs([], {}) == {}
 
 
+def test_failing_jobs_outdated():
+    '''Jobs submitted with other resources than the class has now end the run'''
+    old = JobResources(1, 4 * GB, 3600, 2880)
+    new = JobResources(1, 8 * GB, 3600, 2880)
+    records = [record('1', 'big', resources=old), record('2', 'big', resources=old),
+               record('3', 'big', resources=old), record('4', 'big')]
+    outcomes = {r.job_id: FAILED for r in records}
+    assert failing_jobs(records, outcomes, resources={'big': new}) == {}
+    assert failing_jobs(records, outcomes, limit=1, resources={'big': new}) == {
+        'big': ((records[3], FAILED),)}    # recorded without resources: compared to nothing
+    assert len(failing_jobs(records, outcomes, resources={'big': old})['big']) == 4
+    assert len(failing_jobs(records, outcomes)['big']) == 4
+
+
 READY_NOTE = ("tasks are ready, but no worker is queued or running and no submitter is "
               "running: run 'jug-hpc submit'")
 
@@ -275,6 +290,14 @@ def test_status_failing_jobs(project):
     # nothing ready in the class
     r = report({'big': TaskCounts(waiting=2, running=1), 'default': TaskCounts(finished=3)})
     assert all('ended in error' not in w for w in r.warnings)
+
+    # jobs submitted with other resources than the class has now (8G): outdated,
+    # so only the note
+    old = JobResources(1, 4 * GB, 3600, 2880)
+    records[1:] = [replace(r, resources=old) for r in records[1:]]
+    r = report()
+    assert r.warnings == []
+    assert r.notes == [READY_NOTE]
 
 
 def test_status_stale_locks(project):

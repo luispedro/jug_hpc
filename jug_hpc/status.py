@@ -79,6 +79,7 @@ __all__ = [
     'lock_warning',
     'locks_to_release',
     'release_messages',
+    'resources_now',
     'status',
     'worker_counts',
 ]
@@ -228,7 +229,9 @@ def status(project, by_class, hit_barrier, records, statuses, outcomes, now, *,
     report = progress(by_class, hit_barrier)
     failing = {}
     if no_submitter and report.progress is Progress.RUNNING:
-        failing = {n: jobs for n, jobs in failing_jobs(workers_jobs, outcomes).items()
+        now = resources_now(project, by_class)
+        failing = {n: jobs for n, jobs
+                   in failing_jobs(workers_jobs, outcomes, resources=now).items()
                    if n in by_class and by_class[n].ready
                    and not workers.get(n, WorkerCounts()).active}
     if report.progress is Progress.FINISHED:
@@ -262,7 +265,7 @@ def status(project, by_class, hit_barrier, records, statuses, outcomes, now, *,
     return StatusReport('\n'.join(lines), warnings, notes, stale)
 
 
-def failing_jobs(records, outcomes, limit=MAX_FAILED_JOBS):
+def failing_jobs(records, outcomes, limit=MAX_FAILED_JOBS, resources=None):
     '''The classes whose last ``limit`` jobs (or more) all ended in error
 
     Parameters
@@ -273,6 +276,9 @@ def failing_jobs(records, outcomes, limit=MAX_FAILED_JOBS):
         JobId -> JobOutcome, for the finished jobs whose outcome is known
     limit : int, optional
         The fewest jobs in a row (as for :func:`jug_hpc.submitter.stopped_classes`)
+    resources : dict, optional
+        Class name -> JobResources it has now: a job recorded with other
+        resources is outdated (the class was changed since)
 
     Returns
     -------
@@ -280,14 +286,17 @@ def failing_jobs(records, outcomes, limit=MAX_FAILED_JOBS):
         Class name -> tuple of ``(JobRecord, JobOutcome)``, oldest first: the
         jobs of the class after its last job that succeeded, was cancelled by a
         user, has no known outcome (e.g., it is queued or running, or the
-        scheduler forgot it) or was submitted with another backend, for the
-        classes with at least ``limit`` of them, in the order they first appear
+        scheduler forgot it), was submitted with another backend or is
+        outdated, for the classes with at least ``limit`` of them, in the order
+        they first appear
     '''
+    resources = resources or {}
     runs = {}
     for r in records:
         o = outcomes.get(r.job_id)
         jobs = runs.setdefault(r.class_name, [])
-        if o is None or o.outcome in (Outcome.SUCCESS, Outcome.CANCELLED):
+        if (o is None or o.outcome in (Outcome.SUCCESS, Outcome.CANCELLED)
+                or _outdated(r, resources)):
             jobs.clear()
         else:
             jobs.append((r, o))
@@ -396,16 +405,29 @@ def current_kills(project, ended):
     for i, (record, outcome) in enumerate(ended):
         if outcome.outcome is Outcome.SUCCESS:
             last_success[record.class_name] = i
+    now = resources_now(project, {record.class_name for record, _ in ended})
+    return scheduler_kills([
+        (record, outcome) for i, (record, outcome) in enumerate(ended)
+        if record.class_name in now and i > last_success.get(record.class_name, -1)
+        and not _outdated(record, now)])
+
+
+def resources_now(project, names):
+    '''Class name -> JobResources, for the classes of ``names`` in ``jug_hpc.toml``'''
     now = {}
-    for name in {record.class_name for record, _ in ended}:
+    for name in names:
         try:
             now[name] = JobResources.of(project.get_class(name))
         except KeyError:    # the class is no longer in jug_hpc.toml
             pass
-    return scheduler_kills([
-        (record, outcome) for i, (record, outcome) in enumerate(ended)
-        if record.class_name in now and i > last_success.get(record.class_name, -1)
-        and record.resources in (None, now[record.class_name])])
+    return now
+
+
+def _outdated(record, now):
+    '''The job was submitted with other resources than its class has now
+    (``now``: as :func:`resources_now`; jobs recorded without them never are)'''
+    return (record.resources is not None and record.class_name in now
+            and record.resources != now[record.class_name])
 
 
 def _kill_warnings(project, kills):
