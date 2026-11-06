@@ -33,7 +33,8 @@ class, the submitter, and the kills of every recorded job), and `jug-hpc cancel`
 workers left when no task can run (step 7), and `status` and the submitter's log
 warning about locks left by dead workers and `status --release-stale` removing them
 (step 5), and `check` noting jugdirs that can't detect dead workers (step 6,
-`check.dead_worker_note`).
+`check.dead_worker_note`), and `status` warning about a class whose last jobs all ended in
+error (`status.failing_jobs`) instead of only saying to run `jug-hpc submit`.
 
 ## Commands
 
@@ -169,8 +170,10 @@ paths replaced by `/home/me/rnaseq`.
   `PollResult.ended` and sums them up per class when the run is over.
 - **`status.py`**: `jug-hpc status`, pure like `check.py`: `worker_counts` (queued/running
   per class, `SUBMIT_GRACE` as in `active_workers`) and `status(...)` → `StatusReport`
-  (table text, kill warnings per class and kind, stale-lock warnings for classes with
-  locked tasks but no queued/running worker, `StatusReport.stale`, notes);
+  (table text, kill warnings per class and kind, `failing_jobs` warnings for classes
+  with ready tasks, no workers and no submitter whose last `MAX_FAILED_JOBS`+ jobs all
+  ended in error, stale-lock warnings for classes with locked tasks but no
+  queued/running worker, `StatusReport.stale`, notes);
   `classes_to_release`/`locks_to_release`/`release_messages` serve `--release-stale`.
   `cli.cmd_status` reads everything (all jobs of the backend in `jobs.json`, `query` then `outcome`, task counts in a
   subprocess, `ProjectState.submitter_lock_holder()`) and holds no lock.

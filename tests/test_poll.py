@@ -1076,6 +1076,18 @@ def test_cli_submit_stops_failing_workers(tmp_path, monkeypatch, capsys):
         "logs/scheduler/) say why the jobs failed; once fixed, run 'jug-hpc submit' "
         'again\n')
 
+    # status says why no worker is submitted, rather than just 'run jug-hpc submit'
+    status = main(['-C', str(project_dir), 'status'])
+    out, err = capsys.readouterr()
+    assert status == 0, err
+    assert err == (
+        'jug-hpc: warning: [default]: tasks are ready, but no worker of the class is '
+        'queued or running and its last 3 jobs ended in error (the last: job 3: 2 of 2 '
+        'workers did not succeed (workers 1, 2: exit status 127)), which stops a '
+        'submitter from submitting workers for it; the worker logs (in logs/) and the '
+        "scheduler's (in logs/scheduler/) say why the jobs failed; once fixed, run "
+        "'jug-hpc submit'\n")
+
     # once fixed, a new submitter runs it to the end
     toml.write_text(toml.read_text().replace('setup = "exit 127; ', 'setup = "'))
     status = main(['-C', str(project_dir), 'submit', '--interval=0.2'])
@@ -1133,8 +1145,12 @@ def test_cli_submit_reports_killed_jobs(tmp_path, monkeypatch, capsys):
     assert err.splitlines() == [
         ('jug-hpc: warning: [default]: 3 jobs killed for wall time (the last: job 3: '
          f'{killed.removeprefix("ended: ").replace("; ", "); ", 1)}'),
-        ("jug-hpc: note: tasks are ready, but no worker is queued or running and no "
-         "submitter is running: run 'jug-hpc submit'"),
+        # not the note saying to run 'jug-hpc submit': these jobs keep failing
+        ('jug-hpc: warning: [default]: tasks are ready, but no worker of the class is '
+         'queued or running and its last 3 jobs ended in error (the last: job 3: killed: '
+         'wall time limit reached), which stops a submitter from submitting workers for '
+         "it; the worker logs (in logs/) and the scheduler's (in logs/scheduler/) say why "
+         "the jobs failed; once fixed, run 'jug-hpc submit'"),
     ]
 
 

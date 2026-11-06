@@ -433,10 +433,20 @@ CPUs of the worker that ran them).
      failed cancel is `PollResult.cancel_error`, a warning; it does not fail
      the poll (the run is over all the same), so it is not retried.
    - No option to keep them; add `--keep-workers` if users ask.
-   - Noticed: `jug-hpc status` after a `STALLED` run notes "tasks are ready,
-     but no worker ... run 'jug-hpc submit'" (it does not know the class was
-     stopped). Fine: a new submitter gives the class another chance, but the
-     docs example says to fix the cause first.
+   - `jug-hpc status` after a `STALLED` run used to note only "tasks are
+     ready, but no worker ... run 'jug-hpc submit'". Now (`status.failing_jobs`),
+     when no submitter runs, a class with ready tasks and no workers whose
+     last `MAX_FAILED_JOBS` or more jobs (in `jobs.json` order) all ended in
+     error gets a warning instead ("its last N jobs ended in error (the last:
+     ...), which stops a submitter from submitting workers for it; the worker
+     logs ... once fixed, run 'jug-hpc submit'"). Decisions: `status` has no
+     task counts between the jobs, so it does not check (as
+     `update_failing` does) that no task ended meanwhile, and says only that
+     the jobs failed; a job cancelled by a user (`Outcome.CANCELLED`) or
+     without a known outcome ends the run of failures (after `jug-hpc
+     cancel` the class is not failing); not shown while a submitter runs
+     (its log says it, and `submit` would refuse to start); the generic note
+     stays for ready tasks of other classes.
 8. Done: workers that die before Jug starts (e.g. a `setup` command that
    fails) left the tasks ready, so the submitter submitted a new job at
    every poll, forever. Now the submitter fetches the outcome of each job it

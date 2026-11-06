@@ -11,6 +11,7 @@ from jug_hpc.state import JobRecord
 from jug_hpc.status import (
     WorkerCounts,
     classes_to_release,
+    failing_jobs,
     locks_to_release,
     release_messages,
     status,
@@ -168,6 +169,74 @@ def test_status_notes(project):
     report = status(project, barrier, True, [], {}, {}, NOW, scheduler_name='pbs')
     assert report.notes == []
     assert '(more tasks will appear after a barrier)' in report.text.splitlines()
+
+
+def test_failing_jobs():
+    records = [record('1', 'big'), record('2'), record('3', 'big'), record('4', 'big'),
+               record('5'), record('6'), record('7', 'big'), record('8')]
+    outcomes = {'1': FAILED, '2': FAILED, '3': MEMORY, '4': TIME, '5': CANCELLED,
+                '6': FAILED, '7': FAILED, '8': FAILED}
+    big = [records[i] for i in (0, 2, 3, 6)]
+    assert failing_jobs(records, outcomes) == {
+        'big': tuple((r, outcomes[r.job_id]) for r in big)}
+    assert failing_jobs(records, outcomes, limit=2) == {
+        'big': tuple((r, outcomes[r.job_id]) for r in big),
+        'default': ((records[5], FAILED), (records[7], FAILED))}
+    # a job that succeeded, or whose outcome is not known, ends the run
+    assert failing_jobs(records, {**outcomes, '3': OK}, limit=2) == {
+        'big': ((records[3], TIME), (records[6], FAILED)),
+        'default': ((records[5], FAILED), (records[7], FAILED))}
+    assert failing_jobs(records, {k: v for k, v in outcomes.items() if k != '4'}) == {}
+    assert failing_jobs([], {}) == {}
+
+
+READY_NOTE = ("tasks are ready, but no worker is queued or running and no submitter is "
+              "running: run 'jug-hpc submit'")
+
+
+def test_status_failing_jobs(project):
+    by_class = {'big': TaskCounts(ready=2, finished=1), 'default': TaskCounts(finished=3)}
+    records = [record('1'), record('2', 'big'), record('3', 'big'), record('4', 'big')]
+    statuses = {r.job_id: FINISHED for r in records}
+    outcomes = {'1': OK, '2': FAILED, '3': FAILED, '4': MEMORY}
+
+    def report(by_class=by_class, outcomes=outcomes, **kwargs):
+        return status(project, by_class, False, records, statuses, outcomes, NOW,
+                      scheduler_name='pbs', **kwargs)
+
+    failing = ("[class.big]: tasks are ready, but no worker of the class is queued or "
+               'running and its last 3 jobs ended in error (the last: job 4: memory limit '
+               'exceeded), which stops a submitter from submitting workers for it; the '
+               "worker logs (in logs/) and the scheduler's (in logs/scheduler/) say why the "
+               "jobs failed; once fixed, run 'jug-hpc submit'")
+    r = report()
+    assert r.warnings[-1] == failing
+    assert len(r.warnings) == 2     # the memory kill
+    # instead of the note
+    assert r.notes == []
+
+    # the note is still there for the ready tasks of other classes
+    r = report({**by_class, 'default': TaskCounts(ready=1)})
+    assert r.warnings[-1] == failing
+    assert r.notes == [READY_NOTE]
+
+    # fewer than MAX_FAILED_JOBS in a row: only the note
+    r = report(outcomes={**outcomes, '2': OK})
+    assert len(r.warnings) == 1
+    assert r.notes == [READY_NOTE]
+    # jobs cancelled by a user say nothing about whether the workers work
+    r = report(outcomes={**outcomes, '4': CANCELLED})
+    assert len(r.warnings) == 0
+    assert len(r.notes) == 1
+
+    # a running submitter says so in its log (and 'jug-hpc submit' would fail)
+    r = report(lock_holder='9@x')
+    assert len(r.warnings) == 1
+    assert r.notes == []
+
+    # nothing ready in the class
+    r = report({'big': TaskCounts(waiting=2, running=1), 'default': TaskCounts(finished=3)})
+    assert all('ended in error' not in w for w in r.warnings)
 
 
 def test_status_stale_locks(project):

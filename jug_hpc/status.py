@@ -31,6 +31,17 @@ jug-hpc) is reported as well, which the warning says. Nothing is reported
 while a class no longer in ``jug_hpc.toml`` has workers queued or running,
 as their tasks are counted in the classes that match them now.
 
+A class with ready tasks, no worker queued or running and no submitter running
+whose last :data:`~jug_hpc.submitter.MAX_FAILED_JOBS` jobs (or more) all ended
+in error (:func:`failing_jobs`) gets a warning instead of the note that says to
+run ``jug-hpc submit``: this is how a run stopped by failing workers
+(``Progress.STALLED``) looks afterwards, and a new submitter would only run into
+the same errors. Unlike the submitter, ``status`` does not know whether a task
+of the class ended between these jobs, so it only says that they failed and
+where the logs are. Jobs cancelled by a user (``qdel``, ``jug-hpc cancel``) and
+jobs whose outcome is not known end the run of failures: they say nothing about
+whether the workers work.
+
 ``jug-hpc status --release-stale`` removes those locks: the CLI reads
 ``jobs.json`` and asks the scheduler again, and releases (with
 :func:`jug_hpc.jugstate.release_locks`) the locks listed by the count in the
@@ -43,19 +54,22 @@ from dataclasses import dataclass, field
 from .config.project import SUBMITTER
 from .jugstate import STATES, TaskCounts
 from .kills import kill_counts, kill_reason, scheduler_kills, suggestion
-from .schedulers.base import JobState
+from .schedulers.base import JobState, Outcome
 from .submitter import (
+    MAX_FAILED_JOBS,
     SUBMIT_GRACE,
     Progress,
     active_submitter_jobs,
     locked_without_workers,
     progress,
 )
+from .worker import SCHEDULER_LOGS
 
 __all__ = [
     'StatusReport',
     'WorkerCounts',
     'classes_to_release',
+    'failing_jobs',
     'lock_warning',
     'locks_to_release',
     'release_messages',
@@ -125,7 +139,9 @@ class StatusReport:
         The table and the submitter's line (for stdout)
     warnings : list of str
         Jobs killed by the scheduler, one per class and way of being killed;
-        then the classes with locked tasks but no workers
+        then the classes with ready tasks whose last jobs all ended in error
+        (when no worker of the class and no submitter runs); then the classes
+        with locked tasks but no workers
     notes : list of str
         Informational: the run is over, tasks are ready with nobody to run
         them, jobs of another backend were not asked about, ...
@@ -201,14 +217,21 @@ def status(project, by_class, hit_barrier, records, statuses, outcomes, now, *,
     lines.append(_submitter_line(submitters, statuses, lock_holder))
 
     notes = []
+    warnings = []
+    no_submitter = not submitters and lock_holder is None
     report = progress(by_class, hit_barrier)
+    failing = {}
+    if no_submitter and report.progress is Progress.RUNNING:
+        failing = {n: jobs for n, jobs in failing_jobs(workers_jobs, outcomes).items()
+                   if n in by_class and by_class[n].ready
+                   and not workers.get(n, WorkerCounts()).active}
     if report.progress is Progress.FINISHED:
         notes.append('every task is finished')
     elif report.progress is Progress.BLOCKED:
         failed = ', '.join(f'{_label(n)} {c}' for n, c in report.failed.items())
         notes.append(f'no task can run: failed tasks: {failed}')
-    elif (total_tasks.ready and not total_workers.active and not submitters
-          and lock_holder is None):
+    elif (not total_workers.active and no_submitter
+          and any(c.ready for n, c in by_class.items() if n not in failing)):
         notes.append("tasks are ready, but no worker is queued or running and no submitter "
                      "is running: run 'jug-hpc submit'")
     if unknown:
@@ -225,10 +248,44 @@ def status(project, by_class, hit_barrier, records, statuses, outcomes, now, *,
                      f'not asked about (the backend in use is {scheduler_name!r})')
 
     ended = [(r, outcomes[r.job_id]) for r in workers_jobs if r.job_id in outcomes]
-    warnings = _kill_warnings(project, scheduler_kills(ended))
+    warnings.extend(_kill_warnings(project, scheduler_kills(ended)))
+    logs = _logs(project)
+    warnings.extend(_failing_warning(name, jobs, logs) for name, jobs in failing.items())
     stale = locked_without_workers(by_class, {n: w.active for n, w in workers.items()})
     warnings.extend(lock_warning(name, by_class[name].running) for name in stale)
     return StatusReport('\n'.join(lines), warnings, notes, stale)
+
+
+def failing_jobs(records, outcomes, limit=MAX_FAILED_JOBS):
+    '''The classes whose last ``limit`` jobs (or more) all ended in error
+
+    Parameters
+    ----------
+    records : sequence of JobRecord
+        The worker jobs, in submission order
+    outcomes : dict
+        JobId -> JobOutcome, for the finished jobs whose outcome is known
+    limit : int, optional
+        The fewest jobs in a row (as for :func:`jug_hpc.submitter.stopped_classes`)
+
+    Returns
+    -------
+    failing : dict
+        Class name -> tuple of ``(JobRecord, JobOutcome)``, oldest first: the
+        jobs of the class after its last job that succeeded, was cancelled by a
+        user, has no known outcome (e.g., it is queued or running, or the
+        scheduler forgot it) or was submitted with another backend, for the
+        classes with at least ``limit`` of them, in the order they first appear
+    '''
+    runs = {}
+    for r in records:
+        o = outcomes.get(r.job_id)
+        jobs = runs.setdefault(r.class_name, [])
+        if o is None or o.outcome in (Outcome.SUCCESS, Outcome.CANCELLED):
+            jobs.clear()
+        else:
+            jobs.append((r, o))
+    return {name: tuple(jobs) for name, jobs in runs.items() if len(jobs) >= limit}
 
 
 def classes_to_release(stale, records, statuses, now, *, scheduler_name,
@@ -330,6 +387,27 @@ def _kill_warnings(project, kills):
             advice = suggestion(outcome, rc) if rc is not None else ''
             warnings.append(f'{message}; {advice}' if advice else message)
     return warnings
+
+
+def _failing_warning(name, jobs, logs):
+    '''The warning about a class whose last jobs all ended in error'''
+    record, outcome = jobs[-1]
+    return (f'{_label(name)}: tasks are ready, but no worker of the class is queued or '
+            f'running and its last {len(jobs)} jobs ended in error (the last: job '
+            f'{record.job_id}: {outcome.detail or outcome.outcome.value}), which stops a '
+            "submitter from submitting workers for it; the worker logs (in "
+            f"{logs}/) and the scheduler's (in {logs}/{SCHEDULER_LOGS}/) say why the jobs "
+            "failed; once fixed, run 'jug-hpc submit'")
+
+
+def _logs(project):
+    '''The worker logs directory, as shown to users (relative if in the project)'''
+    if project.logs is None:
+        return 'logs'
+    try:
+        return str(project.logs.relative_to(project.project_dir))
+    except ValueError:
+        return str(project.logs)
 
 
 def lock_warning(name, n, *, submitter=False):

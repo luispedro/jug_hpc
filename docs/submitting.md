@@ -285,14 +285,17 @@ class          waiting  ready  running  failed  finished  queued  running
 total                2      1        0       0        38       0        0
 
 Submitter: not running
-jug-hpc: warning: [class.align]: 4 jobs killed for wall time (the last: job 5: killed: wall time limit reached); raise time (now 00:00:05), or lower time_fraction (now 0.8: a task started after 00:00:04 has 00:00:01 left)
-jug-hpc: note: tasks are ready, but no worker is queued or running and no submitter is running: run 'jug-hpc submit'
+jug-hpc: warning: [class.align]: 3 jobs killed for wall time (the last: job 4: killed: wall time limit reached); raise time (now 00:00:05), or lower time_fraction (now 0.8: a task started after 00:00:04 has 00:00:01 left)
+jug-hpc: warning: [class.align]: tasks are ready, but no worker of the class is queued or running and its last 3 jobs ended in error (the last: job 4: killed: wall time limit reached), which stops a submitter from submitting workers for it; the worker logs (in logs/) and the scheduler's (in logs/scheduler/) say why the jobs failed; once fixed, run 'jug-hpc submit'
 ```
 
 The submitter cancelled the four `default` workers when it stopped: they were
 waiting for the `count` task that needs the `align` task that keeps being
-killed. The note does not know why the submitter stopped: here, raise `time`
-first.
+killed. The second warning replaces the note that says to run `jug-hpc
+submit` (below) when no submitter is running and the last 3 or more jobs of
+a class all ended in error (jobs cancelled by a user, with `qdel` or `jug-hpc
+cancel`, don't count): a new submitter would most likely run into the same
+error. Here, raise `time` first.
 
 Tasks that are locked (counted as running) in a class with no worker queued
 or running are a warning too. Their workers died while running them (a worker
@@ -332,7 +335,8 @@ killed too.
 
 Notes say when every task is finished, when no task can run because some
 failed, and when tasks are ready but no worker is queued or running and no
-submitter is running (run `jug-hpc submit`). The exit status is 0 unless the
+submitter is running (run `jug-hpc submit`; for the tasks of a class whose
+last jobs all ended in error, the warning above instead). The exit status is 0 unless the
 settings, the jugfile, `jobs.json` or the scheduler can't be read.
 
 ## Cancelling a run: `jug-hpc cancel`
