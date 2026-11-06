@@ -88,8 +88,11 @@ Jobs are cancelled with ``qdel JOB...`` (:data:`QSTAT_BATCH` jobs per call;
 an array job's ID deletes all its elements), without ``-x``, so the scheduler
 keeps the deleted jobs' history. ``qdel`` exits with an error when some job
 has already finished or is unknown; its messages about those (``Unknown Job
-Id``, ``Job has finished``, as in OpenPBS's sources; not yet recorded on a
-real cluster) are ignored, as in ``qstat``'s output.
+Id``, ``Job has finished``) are ignored, as in ``qstat``'s output. Recorded on
+PBS Professional 2026.1: ``qdel: Job has finished 1234.server``, exit status
+35. Given a finished job and then an unknown one, it printed only that line;
+whether ``qdel`` goes on to the jobs after one it cannot delete is not known
+yet.
 '''
 import difflib
 import json
@@ -101,7 +104,7 @@ from collections import defaultdict
 from ..config.errors import ConfigError
 from ..runner import CommandError
 from ..script import ScriptVars, render_script
-from ..units import format_hms, memory_in_unit
+from ..units import UnitError, format_hms, memory_in_unit, parse_memory
 from .base import (
     JobId,
     JobOutcome,
@@ -562,13 +565,32 @@ def element_outcome(attrs, limits=None, array_deleted=False):
         mem = _resource(attrs, 'Resource_List', 'mem') or (limits or {}).get('mem')
         if signum == signal.SIGKILL:
             # cgroup OOM kills show only as SIGKILL; memory use is sampled, so
-            # the last measurement may be well below the limit
+            # the last measurement may be well below the limit (even 0kb), and
+            # then only contradicts the guess
             cause += ', probably for using more memory than requested'
-            if used_mem and mem:
+            if _near_limit(used_mem, mem):
                 cause += f' (last measured use: {used_mem} of {mem})'
         elif used_mem and mem:
             cause += f'; memory used: {used_mem} of {mem}'
     return JobOutcome(outcome, status, signum, cause)
+
+
+def _pbs_bytes(size):
+    '''A PBS size (``36020kb``, ``1gb``) in bytes, or None if it is not one'''
+    if not isinstance(size, str):
+        return None
+    if re.fullmatch(r'\s*0+\s*[kmgtp]?b?\s*', size, re.IGNORECASE):
+        return 0
+    try:
+        return parse_memory(size)
+    except UnitError:
+        return None
+
+
+def _near_limit(used, limit):
+    '''Memory use ``used`` was measured at half its ``limit`` or more (PBS sizes)'''
+    used, limit = _pbs_bytes(used), _pbs_bytes(limit)
+    return used is not None and limit is not None and 2 * used >= limit
 
 
 def array_exit_outcome(attrs):

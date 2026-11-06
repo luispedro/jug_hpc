@@ -514,10 +514,12 @@ EXIT_3 = JobOutcome(Outcome.FAILED, 3, None, 'exit status 3')
     # 5-exit-status
     ('qstat-xt-ok.json', {'27677406.aqua': SUCCESS}),
     ('qstat-xt-exit3.json', {'27677408.aqua': EXIT_3}),
+    # the last measured use (446448kb of 1gb) is left out: well below the limit,
+    # it would only contradict the guess
     ('qstat-xt-mem.json', {'27677409.aqua': JobOutcome(
         Outcome.KILLED_SIGNAL, 137, 9,
-        'killed by SIGKILL (Exit_status 137), probably for using more memory than requested '
-        '(last measured use: 446448kb of 1gb)')}),
+        'killed by SIGKILL (Exit_status 137), probably for using more memory than '
+        'requested')}),
     # Exit_status is the string "-29" here
     ('qstat-xt-walltime.json', {'27677410.aqua': JobOutcome(
         Outcome.KILLED_TIME, -29, None,
@@ -544,13 +546,22 @@ EXIT_3 = JobOutcome(Outcome.FAILED, 3, None, 'exit status 3')
         Outcome.FAILED, 1, None,
         '3 of 3 workers did not succeed (worker 1: exit status 1; workers 2, 3: deleted '
         'with qdel (Exit_status 1))')}),
+    # 6-cancel: jug-hpc cancel deleted the submitter job (Python exits 143 on
+    # SIGTERM), then the running array of workers (Jug exits 1 on SIGTERM)
+    ('qstat-xt-cancel.json', {
+        '27724105.aqua': JobOutcome(Outcome.CANCELLED, 143, 15,
+                                    'deleted with qdel (Exit_status 143)'),
+        '27724163[].aqua': JobOutcome(
+            Outcome.CANCELLED, 1, None,
+            '2 of 2 workers did not succeed (workers 1, 2: deleted with qdel '
+            '(Exit_status 1))')}),
     # 7-kills: a Jug worker over its memory, three over their wall time, then the
     # same with enough of both
     ('qstat-xt-kills.json', {
         '27722309.aqua': JobOutcome(
             Outcome.KILLED_SIGNAL, 137, 9,
             'killed by SIGKILL (Exit_status 137), probably for using more memory than '
-            'requested (last measured use: 36020kb of 1gb)'),
+            'requested'),
         **dict.fromkeys(['27722310.aqua', '27722324.aqua', '27722331.aqua'], JobOutcome(
             Outcome.KILLED_TIME, -29, None,
             'killed by PBS: wall time limit exceeded (Exit_status -29)')),
@@ -558,6 +569,26 @@ EXIT_3 = JobOutcome(Outcome.FAILED, 3, None, 'exit status 3')
 ])
 def test_recorded_qstat_outcomes(name, expected):
     assert parse_qstat_outcomes(recorded(name)) == expected
+
+
+@pytest.mark.parametrize('used, limit, shown', [
+    ('16252928kb', '16gb', True),
+    ('8gb', '16gb', True),
+    ('446448kb', '1gb', False),
+    ('0kb', '1gb', False),
+    ('0', '1gb', False),
+    (None, '1gb', False),
+    ('lots', '1gb', False),
+])
+def test_sigkill_memory_use_shown_near_limit(used, limit, shown):
+    attrs = {'Exit_status': 137, 'resources_used': {'walltime': '00:00:10'},
+             'Resource_List': {'walltime': '01:00:00', 'mem': limit}}
+    if used is not None:
+        attrs['resources_used']['mem'] = used
+    detail = element_outcome(attrs).detail
+    assert detail.startswith('killed by SIGKILL (Exit_status 137), probably for using more '
+                             'memory than requested')
+    assert ('last measured use' in detail) == shown
 
 
 @pytest.mark.parametrize('raw', [
@@ -719,6 +750,14 @@ def test_cancel():
     pbs.cancel([JobId('1[].s'), JobId('2.s')])
     pbs.cancel([])
     assert runner.argvs == [('qdel', '1[].s', '2.s')]
+
+
+def test_recorded_cancel_finished():
+    '''qdel of a job that has finished, as recorded (step 6 of the manual kit): exit
+    status 35, and a message that is ignored'''
+    runner = FakeRunner().on('qdel', returncode=35,
+                             stderr='qdel: Job has finished 27724105.aqua\n')
+    PBSScheduler(CLUSTER, runner).cancel([JobId('27724105.aqua')])
 
 
 def test_cancel_batches():

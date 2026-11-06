@@ -282,7 +282,7 @@ Local backend: done (`tests/test_poll.py::test_cli_submit_runs_three_classes`,
 a default → align → merge → default chain whose tasks record the class and
 CPUs of the worker that ran them).
 
-### Milestone 4: status, cancel and failure handling
+### Milestone 4: status, cancel and failure handling — done
 
 1. Done: `jug-hpc status`: Jug's task counts grouped by class, plus
    queued/running workers per class (`status.py`, pure; `cli.cmd_status`).
@@ -368,8 +368,13 @@ CPUs of the worker that ran them).
      submission; older records are compared on success only) differ from the
      class's now, and those of classes no longer in `jug_hpc.toml`. The
      submitter's log is unchanged (its settings don't change during a run).
-     `failing_jobs` is unchanged: it is about the last jobs only, and its
-     message already says to run `jug-hpc submit` once fixed.
+     `failing_jobs` likewise: a job recorded with other resources than the
+     class has now ends the run of failures (as a cancelled one), so after
+     a fix `status` gives the note that says to run `jug-hpc submit`.
+     Changes to `setup` are not detected (only resources are recorded).
+   - The memory guess for a SIGKILL showed "(last measured use: 0kb of
+     1gb)" on the real cluster (PBS samples memory use, and missed it): the
+     measurement is shown only when it is at least half the limit.
    - Noticed while documenting it: a job that ran tasks and was then killed
      for wall time counts towards `MAX_FAILED_JOBS` when no task of the class
      ended between the poll before and the one that sees it end (step 8
@@ -482,9 +487,17 @@ CPUs of the worker that ran them).
      `--max-failed-jobs` option if users ask.
 
 **Done when:** a test jugfile with a task that exceeds its memory and one that
-exceeds its wall time produces a correct per-class report on PBS (step 7
-of `tests/manual/pbs/run-everything.sh`, not yet run on a real cluster; step
-8 checks step 7 above). → **Release 0.3.**
+exceeds its wall time produces a correct per-class report on PBS. → **Release
+0.3.** Done: checked on PBS Professional 2026.1 on 2026-11-06 (commit
+4e8bd35), with steps 1–8 of `tests/manual/pbs/run-everything.sh` all passing:
+step 7 (memory and wall-time kills, the stale lock, `--release-stale`, the
+fix), step 8 (step 7 above), and step 6 (`jug-hpc cancel` of a running
+submitter job and running workers; the `qdel` message for a finished job,
+recorded, is the one ignored). Recordings in `tests/pbs_output/pbspro-2026.1/`.
+Open: given a finished job and then an unknown one, `qdel` printed a message
+only for the first. If it stops at the first job it cannot delete, a
+`jug-hpc cancel` racing a job that just ended would leave the later jobs of
+its batch alone; check by hand (`qdel <finished> <queued>`).
 
 ### Milestone 5: second scheduler and 1.0
 

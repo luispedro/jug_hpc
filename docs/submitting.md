@@ -299,8 +299,10 @@ waiting for the `count` task that needs the `align` task that keeps being
 killed. The second warning replaces the note that says to run `jug-hpc
 submit` (below) when no submitter is running and the last 3 or more jobs of
 a class all ended in error (jobs cancelled by a user, with `qdel` or `jug-hpc
-cancel`, don't count): a new submitter would most likely run into the same
-error. Here, raise `time` first.
+cancel`, don't count, nor jobs that asked for other resources than the class
+has now): a new submitter would most likely run into the same error. Here,
+raise `time` first; then both warnings go away, and the note says to run
+`jug-hpc submit`.
 
 Tasks that are locked (counted as running) in a class with no worker queued
 or running are a warning too. Their workers died while running them (a worker

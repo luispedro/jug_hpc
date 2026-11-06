@@ -73,7 +73,9 @@ How a job ended is read from its `Exit_status` (and `substate`):
 The SIGKILL case is a guess: on clusters that enforce memory limits with
 cgroups, a job that uses too much memory is killed by the kernel, and PBS
 records nothing but the SIGKILL (the job's PBS output file, in
-`logs/scheduler/`, may say more).
+`logs/scheduler/`, may say more). PBS measures memory use only now and then,
+so the last measurement is shown (`last measured use: ... of ...`) only when
+it reached at least half the job's memory.
 
 ### Raw options
 

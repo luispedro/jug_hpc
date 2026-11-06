@@ -21,7 +21,7 @@ per-project lock), with end-to-end tests on the local backend (chain, three-clas
 barrier, workers stopped by `JUG_MAX_SECONDS`, failed task), and `submit --as-job` (the
 submitter as a job, sized by `[submitter]` in `jug_hpc.toml`), and backoff while nothing
 changes (`--max-interval`). Jug's status cache is deliberately not used (PLAN.md).
-Milestone 4 has started: `Scheduler.outcome()` for PBS and local (a `JobOutcome` per
+Milestone 4 is done (checked on a real PBS cluster, 2026-11-06): `Scheduler.outcome()` for PBS and local (a `JobOutcome` per
 finished job; arrays combined by `schedulers.base.combine_outcomes`, worst worker wins),
 used by the submitter to stop submitting workers for a class whose jobs keep failing
 (step 8: `submitter.update_failing`/`stopped_classes`, `Progress.STALLED`), and
@@ -172,7 +172,8 @@ paths replaced by `/home/me/rnaseq`.
   per class, `SUBMIT_GRACE` as in `active_workers`) and `status(...)` → `StatusReport`
   (table text, kill warnings per class and kind (`current_kills` leaves out outdated
   ones: followed by a success of the class, or of jobs whose `JobResources`, recorded in
-  `jobs.json` at submission, differ from the class's now), `failing_jobs` warnings for classes
+  `jobs.json` at submission, differ from the class's now (`resources_now`)), `failing_jobs`
+  warnings (outdated jobs end the run of failures) for classes
   with ready tasks, no workers and no submitter whose last `MAX_FAILED_JOBS`+ jobs all
   ended in error, stale-lock warnings for classes with locked tasks but no
   queued/running worker, `StatusReport.stale`, notes);
