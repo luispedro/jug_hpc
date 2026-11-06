@@ -532,6 +532,29 @@ EXIT_3 = JobOutcome(Outcome.FAILED, 3, None, 'exit status 3')
     # 3-failing-setup: setup = "exit 3; ..."
     ('qstat-xt-failing-setup.json', {'27668263.aqua': EXIT_3, '27668695.aqua': EXIT_3,
                                      '27669621.aqua': EXIT_3}),
+    # 6-cancel: a whole array deleted while queued: the array is in substate 91,
+    # its elements in 92 without Exit_status
+    ('qstat-xt-qdel-queued-array.json', {'27722308[].aqua': JobOutcome(
+        Outcome.CANCELLED, None, None,
+        '2 of 2 workers did not succeed (workers 1, 2: deleted with qdel before it '
+        'started)')}),
+    # 8-blocked: worker 1 ran the task that raises (Jug exits 1), workers 2 and 3
+    # were deleted while running (Jug exits 1 on SIGTERM)
+    ('qstat-xt-qdel-running-array.json', {'27722444[].aqua': JobOutcome(
+        Outcome.FAILED, 1, None,
+        '3 of 3 workers did not succeed (worker 1: exit status 1; workers 2, 3: deleted '
+        'with qdel (Exit_status 1))')}),
+    # 7-kills: a Jug worker over its memory, three over their wall time, then the
+    # same with enough of both
+    ('qstat-xt-kills.json', {
+        '27722309.aqua': JobOutcome(
+            Outcome.KILLED_SIGNAL, 137, 9,
+            'killed by SIGKILL (Exit_status 137), probably for using more memory than '
+            'requested (last measured use: 36020kb of 1gb)'),
+        **dict.fromkeys(['27722310.aqua', '27722324.aqua', '27722331.aqua'], JobOutcome(
+            Outcome.KILLED_TIME, -29, None,
+            'killed by PBS: wall time limit exceeded (Exit_status -29)')),
+        **dict.fromkeys(['27722349.aqua', '27722350.aqua', '27722424.aqua'], SUCCESS)}),
 ])
 def test_recorded_qstat_outcomes(name, expected):
     assert parse_qstat_outcomes(recorded(name)) == expected

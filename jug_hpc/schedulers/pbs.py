@@ -76,7 +76,10 @@ worst element (:func:`~.base.combine_outcomes`).
 
 Checked on PBS Professional 2026.1 with cgroups (``tests/pbs_output/pbspro-2026.1/``):
 a wall time kill is ``-29``; a ``qdel`` of a running job is ``143`` with
-substate 91; a job over its memory is killed by the cgroup's OOM killer, which
+substate 91 (a running Jug worker exits with ``1``: Jug turns ``SIGTERM`` into
+``sys.exit(1)``); a ``qdel`` of a whole array still queued leaves the array in
+substate 91, but its elements in substate 92 with no ``Exit_status``, so such
+elements count as deleted when their array is; a job over its memory is killed by the cgroup's OOM killer, which
 PBS shows only as ``137`` (SIGKILL), so it is reported as a SIGKILL that is
 probably a memory kill. ``Exit_status`` may be an integer or a string
 (``"-29"``). The other codes are from the documentation and OpenPBS's sources.
@@ -506,7 +509,7 @@ def _killed_by(status):
     return None
 
 
-def element_outcome(attrs, limits=None):
+def element_outcome(attrs, limits=None, array_deleted=False):
     '''How a finished plain job or array element ended, from its ``qstat`` attributes
 
     Parameters
@@ -517,6 +520,9 @@ def element_outcome(attrs, limits=None):
         ``Resource_List`` (for wall time kills, and memory use)
     limits : dict, optional
         The array job's ``Resource_List``, for an element that lists none
+    array_deleted : bool, optional
+        The element's array job was deleted with ``qdel`` (its elements that
+        had not started show no sign of it)
 
     Returns
     -------
@@ -525,7 +531,7 @@ def element_outcome(attrs, limits=None):
     status = _exit_status(attrs)
     deleted = _int_attr(attrs, 'substate') == SUBSTATE_TERMINATED
     if status is None:
-        if deleted:
+        if deleted or array_deleted:
             return JobOutcome(Outcome.CANCELLED, detail='deleted with qdel before it started')
         return JobOutcome(Outcome.UNKNOWN,
                           detail='no exit status (deleted before it started?)')
@@ -624,8 +630,9 @@ def parse_qstat_outcomes(stdout):
         if listed:
             limits = attrs.get('Resource_List')
             limits = limits if isinstance(limits, dict) else None
+            deleted = _int_attr(attrs, 'substate') == SUBSTATE_TERMINATED
             outcomes[job_id] = combine_outcomes(
-                {i: element_outcome(a, limits) for i, a in listed.items()})
+                {i: element_outcome(a, limits, deleted) for i, a in listed.items()})
         else:
             outcomes[job_id] = array_exit_outcome(attrs)
     return outcomes

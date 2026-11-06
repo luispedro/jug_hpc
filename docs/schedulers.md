@@ -67,7 +67,7 @@ How a job ended is read from its `Exit_status` (and `substate`):
 | `-27`, `-26` | killed for memory |
 | `128 + N` or `256 + N` | killed by signal `N` |
 | `137` or `265` (SIGKILL) | killed by SIGKILL, *probably for using more memory than requested* |
-| substate 91 | deleted with `qdel` |
+| substate 91 (or, for the workers of an array that was not running yet, the array's) | deleted with `qdel` |
 | other values | failed, with that exit status |
 
 The SIGKILL case is a guess: on clusters that enforce memory limits with
