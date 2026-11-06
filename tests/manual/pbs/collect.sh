@@ -10,6 +10,8 @@ cd -- "$(dirname -- "$0")" || exit 1
 mkdir -p recorded
 name=${1:?usage: $0 NAME JOBID...}
 shift
+# without job IDs, qstat -x would list every job of the user
+[ $# -gt 0 ] || { echo "collect.sh $name: no job IDs: nothing recorded" >&2; exit 1; }
 qstat -f -F json -x "$@" >"recorded/$name.json" 2>"recorded/$name.err"
 echo $? >"recorded/$name.status"
 qstat -f -F json -x -t "$@" >"recorded/$name-t.json" 2>"recorded/$name-t.err"

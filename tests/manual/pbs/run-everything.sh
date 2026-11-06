@@ -18,11 +18,11 @@
 #
 # At the end, everything worth sending back is in pbs-results.tgz.
 set -u
-shopt -s nullglob
 KIT=$(cd -- "$(dirname -- "$0")" && pwd)
 cd -- "$KIT" || exit 1
 
-# what a run leaves here (everything else is in git)
+# what a run leaves here (everything else is in git). No nullglob: job IDs of
+# arrays (1234[].server) are glob patterns, and $(job_ids) is unquoted.
 result_paths() {
     local p
     for p in recorded run.log pbs-results.tgz [0-9]*/jugfile.jugdata [0-9]*/.jug_hpc \
@@ -271,8 +271,8 @@ step6() (
     # qdel's messages for a finished job and an unknown one (which the backend ignores)
     # shellcheck disable=SC2046
     { qdel $(job_ids submitter) 99999999; echo "exit status: $?"; } \
-        >recorded/qdel-finished-unknown.txt 2>&1
-    cat recorded/qdel-finished-unknown.txt
+        >../recorded/qdel-finished-unknown.txt 2>&1
+    cat ../recorded/qdel-finished-unknown.txt
     cat /dev/null logs/submitter-*.log
     want 'cancel exits with status 0' [ "$st" = 0 ]
     want 'cancelling again exits with status 0' [ "$(tail -1 cancel.log)" = 'exit status: 0' ]
