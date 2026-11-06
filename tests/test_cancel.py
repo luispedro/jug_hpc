@@ -302,6 +302,11 @@ def test_cli_cancel_submitter_job(tmp_path, monkeypatch, capsys):
     assert state.submitter_lock_holder() is None
     assert set(outcomes(sched, project_dir).values()) == {Outcome.CANCELLED}
     assert len(state.jobs()) == 3
+    # the submitter job logged why it stopped
+    log = (project_dir / 'logs' / 'submitter-1.log').read_text()
+    assert log.splitlines()[-1].endswith('] stopped by SIGTERM; the workers already submitted '
+                                         "keep running unless cancelled ('jug-hpc cancel' "
+                                         'cancels them)')
 
 
 def test_cli_cancel_refused_while_submitter_runs(tmp_path, monkeypatch, capsys):

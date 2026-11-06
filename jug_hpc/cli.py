@@ -1,5 +1,7 @@
 '''Command line interface: ``jug-hpc <command>``'''
 import argparse
+import contextlib
+import signal
 import sys
 from pathlib import Path
 
@@ -512,7 +514,7 @@ def _poll(args, start):
         submitter = Submitter(cluster, project, scheduler, project_state)
         for warning in submitter.warnings:
             _message('warning', warning)
-        with project_state.submitter_lock():
+        with _sigterm_raises(), project_state.submitter_lock():
             result = run(submitter, interval=interval, max_interval=args.max_interval,
                          on_poll=on_poll, on_failure=on_failure)
     except (ConfigError, SchedulerError, StateError) as e:
@@ -526,9 +528,43 @@ def _poll(args, start):
     except KeyboardInterrupt:
         _message('note', 'interrupted: the workers already submitted keep running')
         return 130
+    except _Terminated:
+        _log("stopped by SIGTERM; the workers already submitted keep running unless "
+             "cancelled ('jug-hpc cancel' cancels them)")
+        return 128 + signal.SIGTERM
     if killed:
         _message('warning', f'jobs killed by the scheduler: {_kills_by_class(killed)}')
     return _report_end(result.report, _relative(project.logs, project_dir))
+
+
+class _Terminated(BaseException):
+    '''Raised in ``jug-hpc submit`` on ``SIGTERM`` (see :func:`_sigterm_raises`)
+
+    A ``BaseException``, as ``KeyboardInterrupt``, so that no ``except
+    Exception`` on the way catches it.
+    '''
+
+
+@contextlib.contextmanager
+def _sigterm_raises():
+    '''While in the block, ``SIGTERM`` raises :class:`_Terminated`
+
+    ``jug-hpc cancel`` and the scheduler (at the end of a job's wall time) stop
+    the submitter job with ``SIGTERM``. Without a handler Python dies at once
+    and the job's log just stops; with it, the submitter releases its lock and
+    logs why it stopped. A second ``SIGTERM`` kills it as before.
+    '''
+    def handler(signum, frame):
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        raise _Terminated
+
+    previous = signal.signal(signal.SIGTERM, handler)
+    if previous is None:    # a handler not installed from Python
+        previous = signal.SIG_DFL
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def _cancelled_messages(result):

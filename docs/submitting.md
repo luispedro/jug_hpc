@@ -199,7 +199,13 @@ The submitter keeps almost no state of its own. At each poll it reads the task
 states from the jugdir and the submitted jobs from `.jug_hpc/jobs.json`. You can
 stop it at any time (`Ctrl-C`, exit status 130) and start it again later.
 Workers that are already submitted keep running, and the new submitter counts
-them.
+them. On `SIGTERM` (sent by `jug-hpc cancel` to a submitter job, by the
+scheduler at the end of its wall time, or by `kill`), it stops the same way,
+with this line in its log (exit status 143):
+
+```
+[2026-11-06 10:20:46] stopped by SIGTERM; the workers already submitted keep running unless cancelled ('jug-hpc cancel' cancels them)
+```
 
 Only one submitter may run for a project, since two would each submit the
 workers the tasks need. A second `jug-hpc submit` fails with an error naming
@@ -237,8 +243,8 @@ submitter job is already queued or running, or no task is left to run.
 
 The compute nodes must be allowed to submit jobs (`qsub`) and query them
 (`qstat`). Most clusters allow this, but not all. If the submitter job reaches
-its wall time, it is killed, but the workers keep running. Run
-`jug-hpc submit --as-job` again to continue.
+its wall time, it is stopped (its log ends with `stopped by SIGTERM`), but the
+workers keep running. Run `jug-hpc submit --as-job` again to continue.
 
 ## Following a run: `jug-hpc status`
 

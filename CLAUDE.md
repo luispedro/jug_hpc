@@ -28,7 +28,8 @@ used by the submitter to stop submitting workers for a class whose jobs keep fai
 to report jobs killed by the scheduler in the submitter's log, with what to change
 (step 4, `kills.py`), and `jug-hpc status` (step 1, `status.py`: tasks and workers per
 class, the submitter, and the kills of every recorded job), and `jug-hpc cancel`
-(step 2, `cancel.py`; PBS `cancel()` with `qdel`), and the submitter cancelling the
+(step 2, `cancel.py`; PBS `cancel()` with `qdel`; the submitter logs a SIGTERM and exits
+143, `cli._sigterm_raises`), and the submitter cancelling the
 workers left when no task can run (step 7), and `status` and the submitter's log
 warning about locks left by dead workers and `status --release-stale` removing them
 (step 5), and `check` noting jugdirs that can't detect dead workers (step 6,

@@ -324,8 +324,14 @@ CPUs of the worker that ran them).
      them, and the whole cancel, on a real cluster. A job deleted before it
      started (substate 91, no `Exit_status`) is now `CANCELLED`, not
      `UNKNOWN`.
-   - Noticed: the submitter job's log just stops when it is cancelled
-     (Python dies on SIGTERM); a SIGTERM handler could log "cancelled".
+   - The submitter job's log used to just stop when it was cancelled (Python
+     died on SIGTERM). Now `cli._poll` turns SIGTERM into an exception
+     (`_Terminated`, a `BaseException` like `KeyboardInterrupt`): the lock is
+     released and `stopped by SIGTERM; ...` logged (with the time, as the
+     job's log is where it is read), exit status 143. Also at the end of the
+     job's wall time. A second SIGTERM kills it as before. Not handled: a
+     SIGTERM between `submit` and `add_job` loses the job's record (as
+     before, and as with Ctrl-C).
 3. Done: `outcome()` in the PBS backend (`qstat -f -F json -x -t`, so array
    elements are listed with their own `Exit_status`; codes and the wall-time
    heuristic in `pbs.py`'s docstring). Arrays get their worst worker's

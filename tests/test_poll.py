@@ -2,6 +2,7 @@ import dataclasses
 import json
 import os
 import shutil
+import signal
 import sys
 import time
 from datetime import UTC, datetime, timedelta
@@ -911,6 +912,31 @@ def test_cli_submit_locked(tmp_path, monkeypatch, capsys, project):
     err = capsys.readouterr().err
     assert 'another jug-hpc submit is running for this project' in err
     assert state.jobs() == []
+
+
+def test_cli_submit_sigterm(tmp_path, monkeypatch, capsys, project):
+    '''SIGTERM (from 'jug-hpc cancel' or the scheduler) is logged, and frees the lock'''
+    _, settings, _, state = project()
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
+    held = []
+
+    def run(*args, **kwargs):
+        held.append(state.submitter_lock_holder() is not None)
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(10)
+        raise AssertionError('SIGTERM did not stop the run')
+
+    monkeypatch.setattr('jug_hpc.poll.run', run)
+    before = signal.getsignal(signal.SIGTERM)
+    assert main(['-C', str(settings.project_dir), 'submit']) == 128 + signal.SIGTERM
+    out, err = capsys.readouterr()
+    assert held == [True]
+    assert err == ''
+    assert out.split('] ', 1)[1] == (
+        "stopped by SIGTERM; the workers already submitted keep running unless cancelled "
+        "('jug-hpc cancel' cancels them)\n")
+    assert state.submitter_lock_holder() is None
+    assert signal.getsignal(signal.SIGTERM) is before
 
 
 CHAIN = '''\
