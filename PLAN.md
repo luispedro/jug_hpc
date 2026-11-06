@@ -353,11 +353,23 @@ CPUs of the worker that ran them).
      `combine_outcomes`); the detail lists the others. Per-worker counts
      would need `outcome()` to return the workers' outcomes too.
    - Suggestions use the class as configured now; a class no longer in
-     `jug_hpc.toml` gets none.
+     `jug_hpc.toml` gets none (in the submitter's log; `status` leaves
+     such kills out, see below).
    - Done in `status` (step 1): the same report from `jobs.json` and
      `outcome()`, including jobs that ended before the submitter started:
      one warning per class and kind of kill, with the count, the last such
      job and its suggestion.
+   - Decided after the real-cluster run of 2026-11-06 (it kept suggesting
+     "raise memory (now 6G)" after memory had been raised and every task had
+     finished): `status` leaves out outdated kills (`status.current_kills`):
+     those followed by a job of the class that succeeded (in `jobs.json`
+     order), those of jobs whose resources (`state.JobResources`: cpus,
+     memory, time, `JUG_MAX_SECONDS`, now recorded in `jobs.json` at
+     submission; older records are compared on success only) differ from the
+     class's now, and those of classes no longer in `jug_hpc.toml`. The
+     submitter's log is unchanged (its settings don't change during a run).
+     `failing_jobs` is unchanged: it is about the last jobs only, and its
+     message already says to run `jug-hpc submit` once fixed.
    - Noticed while documenting it: a job that ran tasks and was then killed
      for wall time counts towards `MAX_FAILED_JOBS` when no task of the class
      ended between the poll before and the one that sees it end (step 8

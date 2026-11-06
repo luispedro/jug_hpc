@@ -273,7 +273,12 @@ or in a job), or a submitter job (`--as-job`) that is queued or running.
 The jobs that the scheduler killed are warnings, one per class and way of
 being killed, with the same suggestion as in the submitter's log. They cover
 every job in `jobs.json` that the scheduler still knows (on PBS, this needs
-job history), also those from earlier runs. Here, after the run stopped:
+job history), also those from earlier runs, except kills that are outdated:
+those followed by a job of the class that succeeded, those of jobs that asked
+for other resources (`cpus`, `memory`, `time`, `time_fraction`) than the
+class has now (you changed them since, maybe as suggested: the next jobs will
+tell whether it was enough), and those of classes no longer in
+`jug_hpc.toml`. Here, after the run stopped:
 
 ```
 $ jug-hpc status

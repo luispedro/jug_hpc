@@ -19,9 +19,13 @@ number is never reused while the file exists.
     {"version": 1,
      "jobs": [{"job_id": "1234.pbs01", "class": "default", "scheduler": "pbs",
                "workers": 4, "script": ".jug_hpc/scripts/default-1.sh",
-               "submitted": "2026-11-04T10:00:00+00:00"}, ...]}
+               "submitted": "2026-11-04T10:00:00+00:00",
+               "resources": {"cpus": 1, "memory": 2147483648, "time": 3600,
+                             "max_seconds": 2880}}, ...]}
 
-in submission order. Script paths are relative to the project directory, so
+in submission order. ``resources`` (:class:`JobResources`) is what the job
+asked for; files written before it was added have none (readers of format 1
+ignore keys they don't know, so the version stays 1). Script paths are relative to the project directory, so
 the project can be moved. The file is replaced atomically, so readers (e.g.
 ``jug-hpc status`` while the submitter runs) never see a partial file, and
 writers take ``jobs.lock`` so that concurrent additions are not lost.
@@ -45,6 +49,7 @@ __all__ = [
     'FORMAT_VERSION',
     'STATE_DIR',
     'JobRecord',
+    'JobResources',
     'ProjectState',
     'StateError',
 ]
@@ -73,6 +78,51 @@ def _now():
 
 
 @dataclass(frozen=True)
+class JobResources:
+    '''The resources a job was submitted with (to tell whether its class has
+    changed since)
+
+    Attributes
+    ----------
+    cpus : int
+    memory : int
+        Bytes
+    time : int
+        Wall time, in seconds
+    max_seconds : int or None
+        ``JUG_MAX_SECONDS`` (None for the submitter job)
+    '''
+    cpus: int
+    memory: int
+    time: int
+    max_seconds: int | None
+
+    @classmethod
+    def of(cls, spec):
+        '''The resources of ``spec``: a WorkerSpec, or a ResourceClass (as set now)'''
+        return cls(cpus=spec.cpus, memory=spec.memory, time=spec.time,
+                   max_seconds=spec.max_seconds)
+
+    def to_json(self):
+        return {'cpus': self.cpus, 'memory': self.memory, 'time': self.time,
+                'max_seconds': self.max_seconds}
+
+    @classmethod
+    def from_json(cls, data):
+        '''Raises ValueError if ``data`` is not valid (the message says why)'''
+        if not isinstance(data, dict):
+            raise ValueError("'resources' is not an object")  # noqa: TRY004
+        for key in ('cpus', 'memory', 'time', 'max_seconds'):
+            value = data.get(key)
+            if key == 'max_seconds' and key in data and value is None:
+                continue
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError(f"'resources': {key!r} is missing or not a positive integer")
+        return cls(cpus=data['cpus'], memory=data['memory'], time=data['time'],
+                   max_seconds=data['max_seconds'])
+
+
+@dataclass(frozen=True)
 class JobRecord:
     '''One submitted job (a single worker or a job array)
 
@@ -90,6 +140,8 @@ class JobRecord:
         it is outside of it)
     submitted : datetime
         Time of submission, timezone aware
+    resources : JobResources or None
+        What the job asked for (None for jobs recorded before this was kept)
     '''
     job_id: JobId
     class_name: str
@@ -97,10 +149,11 @@ class JobRecord:
     workers: int
     script: Path
     submitted: datetime = field(default_factory=_now)
+    resources: JobResources | None = None
 
     def to_json(self):
         '''The record as a JSON-compatible dict'''
-        return {
+        data = {
             'job_id': self.job_id,
             'class': self.class_name,
             'scheduler': self.scheduler,
@@ -108,6 +161,9 @@ class JobRecord:
             'script': str(self.script),
             'submitted': self.submitted.isoformat(),
         }
+        if self.resources is not None:
+            data['resources'] = self.resources.to_json()
+        return data
 
     @classmethod
     def from_json(cls, data):
@@ -132,9 +188,12 @@ class JobRecord:
         submitted = datetime.fromisoformat(data['submitted'])
         if submitted.tzinfo is None:
             raise ValueError("'submitted' has no timezone")
+        resources = data.get('resources')
+        if resources is not None:
+            resources = JobResources.from_json(resources)
         return cls(job_id=JobId(data['job_id']), class_name=data['class'],
                    scheduler=data['scheduler'], workers=data['workers'],
-                   script=Path(data['script']), submitted=submitted)
+                   script=Path(data['script']), submitted=submitted, resources=resources)
 
 
 class ProjectState:
@@ -223,7 +282,8 @@ class ProjectState:
         '''
         return self._read()
 
-    def add_job(self, job_id, class_name, scheduler, workers, script, submitted=None):
+    def add_job(self, job_id, class_name, scheduler, workers, script, submitted=None, *,
+                resources=None):
         '''Record a submitted job
 
         Parameters
@@ -237,6 +297,8 @@ class ProjectState:
             it is inside it
         submitted : datetime, optional
             Default: now
+        resources : JobResources, optional
+            What the job asked for
 
         Returns
         -------
@@ -251,7 +313,8 @@ class ProjectState:
             script = script.relative_to(self.project_dir)
         record = JobRecord(job_id=JobId(job_id), class_name=class_name,
                            scheduler=scheduler, workers=workers, script=script,
-                           submitted=submitted if submitted is not None else _now())
+                           submitted=submitted if submitted is not None else _now(),
+                           resources=resources)
         self._ensure()
         with self._locked():
             jobs = self._read()

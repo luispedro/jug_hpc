@@ -38,7 +38,7 @@ from .config.errors import ConfigError
 from .config.project import SUBMITTER, jugdir_problem
 from .schedulers.checks import check_scheduler_settings
 from .script import jug_execute_command, submitter_command
-from .state import StateError
+from .state import JobResources, StateError
 from .worker import make_submitter_spec, make_worker_spec
 
 __all__ = [
@@ -345,7 +345,8 @@ def submit_worker(written, scheduler, project_state):
     job_id = scheduler.submit(written.script, p.spec)
     try:
         return project_state.add_job(job_id, p.class_name, scheduler.name,
-                                     p.spec.workers, written.path)
+                                     p.spec.workers, written.path,
+                                     resources=JobResources.of(p.spec))
     except StateError as e:
         raise StateError(f'job {job_id} ({_label(p.class_name)}) was submitted but '
                          f'could not be recorded: {e}') from e

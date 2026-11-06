@@ -170,7 +170,9 @@ paths replaced by `/home/me/rnaseq`.
   `PollResult.ended` and sums them up per class when the run is over.
 - **`status.py`**: `jug-hpc status`, pure like `check.py`: `worker_counts` (queued/running
   per class, `SUBMIT_GRACE` as in `active_workers`) and `status(...)` → `StatusReport`
-  (table text, kill warnings per class and kind, `failing_jobs` warnings for classes
+  (table text, kill warnings per class and kind (`current_kills` leaves out outdated
+  ones: followed by a success of the class, or of jobs whose `JobResources`, recorded in
+  `jobs.json` at submission, differ from the class's now), `failing_jobs` warnings for classes
   with ready tasks, no workers and no submitter whose last `MAX_FAILED_JOBS`+ jobs all
   ended in error, stale-lock warnings for classes with locked tasks but no
   queued/running worker, `StatusReport.stale`, notes);

@@ -8,7 +8,14 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from jug_hpc.state import FORMAT_VERSION, STATE_DIR, JobRecord, ProjectState, StateError
+from jug_hpc.state import (
+    FORMAT_VERSION,
+    STATE_DIR,
+    JobRecord,
+    JobResources,
+    ProjectState,
+    StateError,
+)
 
 T0 = datetime(2026, 11, 4, 10, 0, 0, tzinfo=UTC)
 
@@ -110,6 +117,21 @@ def test_jobs_file_format(tmp_path):
     assert not list(state.path.glob('*.tmp'))
 
 
+def test_job_resources_kept(tmp_path):
+    state = ProjectState(tmp_path)
+    resources = JobResources(cpus=2, memory=2**30, time=3600, max_seconds=2880)
+    r = state.add_job('7', 'default', 'local', 1, 'x.sh', submitted=T0, resources=resources)
+    assert r.resources == resources
+    data = json.loads(state.jobs_file.read_text())
+    assert data['jobs'][0]['resources'] == {'cpus': 2, 'memory': 2**30, 'time': 3600,
+                                            'max_seconds': 2880}
+    assert ProjectState(tmp_path).jobs() == [r]
+    submitter = JobResources(cpus=1, memory=2**30, time=3600, max_seconds=None)
+    entry = JobRecord(job_id='8', class_name='submitter', scheduler='pbs', workers=1,
+                      script=Path('x.sh'), submitted=T0, resources=submitter).to_json()
+    assert JobRecord.from_json(entry).resources == submitter
+
+
 def test_concurrent_adds_all_kept(tmp_path):
     state = ProjectState(tmp_path)
 
@@ -161,6 +183,10 @@ def _entry(**changes):
     ({'workers': '2'}, "'workers'"),
     ({'submitted': '2026-11-04T10:00:00'}, 'timezone'),
     ({'submitted': 'yesterday'}, 'Invalid isoformat'),
+    ({'resources': [1]}, "'resources' is not an object"),
+    ({'resources': {'cpus': 1, 'memory': 1, 'time': 1}}, "'max_seconds' is missing"),
+    ({'resources': {'cpus': 0, 'memory': 1, 'time': 1, 'max_seconds': None}}, "'cpus'"),
+    ({'resources': {'cpus': 1, 'memory': True, 'time': 1, 'max_seconds': 1}}, "'memory'"),
 ])
 def test_invalid_record(changes, message):
     with pytest.raises(ValueError, match=message):

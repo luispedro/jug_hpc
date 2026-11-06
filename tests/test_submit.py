@@ -13,7 +13,7 @@ from jug_hpc.jugstate import load_project
 from jug_hpc.runner import FakeRunner
 from jug_hpc.schedulers import JobState, Outcome, SchedulerError, create_scheduler
 from jug_hpc.schedulers.local import LocalScheduler
-from jug_hpc.state import ProjectState, StateError
+from jug_hpc.state import JobResources, ProjectState, StateError
 from jug_hpc.submit import (
     check_jugdir,
     format_dry_run,
@@ -175,6 +175,8 @@ def test_submit_worker(loaded):
     assert (record.job_id, record.class_name, record.scheduler, record.workers,
             record.script) == ('1234[].pbs01', 'align', 'pbs', 2,
                                Path('.jug_hpc/scripts/align-1.sh'))
+    assert record.resources == JobResources.of(w.prepared.spec)
+    assert record.resources == JobResources.of(project.get_class('align'))
     assert ps.jobs() == [record]
 
 

@@ -7,7 +7,7 @@ from jug_hpc.classes import Classifier
 from jug_hpc.config import load_project_settings
 from jug_hpc.jugstate import TaskCounts
 from jug_hpc.schedulers import JobId, JobOutcome, JobState, JobStatus, Outcome
-from jug_hpc.state import JobRecord
+from jug_hpc.state import JobRecord, JobResources
 from jug_hpc.status import (
     WorkerCounts,
     classes_to_release,
@@ -32,10 +32,11 @@ FINISHED = JobStatus(JobState.FINISHED)
 UNKNOWN = JobStatus(JobState.UNKNOWN)
 
 
-def record(job_id, class_name='default', workers=1, scheduler='pbs', submitted=LONG_AGO):
+def record(job_id, class_name='default', workers=1, scheduler='pbs', submitted=LONG_AGO,
+           resources=None):
     return JobRecord(job_id=JobId(job_id), class_name=class_name, scheduler=scheduler,
                      workers=workers, script=Path(f'.jug_hpc/scripts/{class_name}-1.sh'),
-                     submitted=submitted)
+                     submitted=submitted, resources=resources)
 
 
 @pytest.fixture
@@ -128,8 +129,7 @@ def test_status_kills(project):
         ('[class.big]: 1 job killed for wall time (the last: job 2: wall time limit '
          'exceeded); raise time (now 01:00:00), or lower time_fraction (now 0.8: a task '
          'started after 00:48:00 has 00:12:00 left)'),
-        # no suggestion for a class no longer in jug_hpc.toml
-        '[class.old]: 1 job killed for wall time (the last: job 5: wall time limit exceeded)',
+        # not [class.old], no longer in jug_hpc.toml
     ]
     # a class no longer in jug_hpc.toml without workers is not in the table
     assert report.notes == []
@@ -146,6 +146,44 @@ def test_status_kills(project):
     assert report.notes == [
         ('not in jug_hpc.toml any more, but with workers queued or running: [class.old] '
          '(its tasks are counted in the classes that match them now)')]
+
+
+GB = 2**30
+
+
+def test_status_outdated_kills(project):
+    '''Kills followed by a success, or of jobs with other resources than now, are
+    not reported'''
+    by_class = {'big': TaskCounts(ready=1), 'default': TaskCounts(ready=1)}
+    now_big = JobResources(cpus=1, memory=8 * GB, time=3600, max_seconds=2880)
+    records = [
+        record('1', 'big', resources=JobResources(1, 4 * GB, 3600, 2880)),  # 4G then
+        record('2', 'big', resources=now_big),
+        record('3'),            # recorded without resources
+        record('4'),
+        record('5'),
+        record('6', 'big', resources=now_big),
+    ]
+    statuses = {r.job_id: FINISHED for r in records}
+    outcomes = {'1': MEMORY, '2': TIME, '3': TIME, '4': OK, '5': MEMORY, '6': FAILED}
+    report = status(project, by_class, False, records, statuses, outcomes, NOW,
+                    scheduler_name='pbs', lock_holder='9@x')
+    assert report.warnings == [
+        ('[class.big]: 1 job killed for wall time (the last: job 2: wall time limit '
+         'exceeded); raise time (now 01:00:00), or lower time_fraction (now 0.8: a task '
+         'started after 00:48:00 has 00:12:00 left)'),
+        ('[default]: 1 job killed for memory (the last: job 5: memory limit exceeded); '
+        'raise memory (now 2G)'),
+    ]
+    # a job of the class that succeeds makes them all outdated
+    records.append(record('7', 'big', resources=now_big))
+    outcomes['7'] = OK
+    statuses['7'] = FINISHED
+    report = status(project, by_class, False, records, statuses, outcomes, NOW,
+                    scheduler_name='pbs', lock_holder='9@x')
+    assert report.warnings == [
+        ('[default]: 1 job killed for memory (the last: job 5: memory limit exceeded); '
+        'raise memory (now 2G)')]
 
 
 def test_status_notes(project):

@@ -15,9 +15,13 @@ counts as queued.
 Every job recorded in ``.jug_hpc/jobs.json`` with the backend in use is asked
 about, so the report on killed jobs covers the project's whole history, as far
 as the scheduler remembers it (without job history, PBS forgets jobs soon after
-they end). Each class gets one warning per way its jobs were killed (memory,
-wall time, signal), with the suggestion of :func:`jug_hpc.kills.suggestion`
-for the class as it is set now.
+they end), except for kills that are outdated (:func:`current_kills`): those
+followed by a job of the class that succeeded, those of jobs submitted with
+other resources than the class has now (the user changed them since, maybe as
+suggested; the next jobs will tell), and those of classes no longer in
+``jug_hpc.toml``. Each class gets one warning per way its jobs were killed
+(memory, wall time, signal), with the suggestion of
+:func:`jug_hpc.kills.suggestion` for the class as it is set now.
 
 Tasks that are locked (``running`` in the table) in a class with no queued or
 running worker get a warning: their workers probably died while running them
@@ -55,6 +59,7 @@ from .config.project import SUBMITTER
 from .jugstate import STATES, TaskCounts
 from .kills import kill_counts, kill_reason, scheduler_kills, suggestion
 from .schedulers.base import JobState, Outcome
+from .state import JobResources
 from .submitter import (
     MAX_FAILED_JOBS,
     SUBMIT_GRACE,
@@ -69,6 +74,7 @@ __all__ = [
     'StatusReport',
     'WorkerCounts',
     'classes_to_release',
+    'current_kills',
     'failing_jobs',
     'lock_warning',
     'locks_to_release',
@@ -248,7 +254,7 @@ def status(project, by_class, hit_barrier, records, statuses, outcomes, now, *,
                      f'not asked about (the backend in use is {scheduler_name!r})')
 
     ended = [(r, outcomes[r.job_id]) for r in workers_jobs if r.job_id in outcomes]
-    warnings.extend(_kill_warnings(project, scheduler_kills(ended)))
+    warnings.extend(_kill_warnings(project, current_kills(project, ended)))
     logs = _logs(project)
     warnings.extend(_failing_warning(name, jobs, logs) for name, jobs in failing.items())
     stale = locked_without_workers(by_class, {n: w.active for n, w in workers.items()})
@@ -367,6 +373,41 @@ def locks_to_release(classifier, locked, classes):
     return {name: tuple(hashes) for name, hashes in by_class.items() if hashes}
 
 
+def current_kills(project, ended):
+    '''The jobs killed by the scheduler whose kills are not outdated
+
+    A kill is outdated if a job of the same class recorded after it succeeded,
+    if the job asked for other resources (:class:`~jug_hpc.state.JobResources`)
+    than the class has now, or if the class is no longer in ``jug_hpc.toml``.
+    Jobs recorded without their resources are compared on success only.
+
+    Parameters
+    ----------
+    project : ProjectSettings
+    ended : sequence of (JobRecord, JobOutcome)
+        In the order of ``jobs.json``
+
+    Returns
+    -------
+    kills : list of (JobRecord, JobOutcome)
+        As :func:`jug_hpc.kills.scheduler_kills`
+    '''
+    last_success = {}
+    for i, (record, outcome) in enumerate(ended):
+        if outcome.outcome is Outcome.SUCCESS:
+            last_success[record.class_name] = i
+    now = {}
+    for name in {record.class_name for record, _ in ended}:
+        try:
+            now[name] = JobResources.of(project.get_class(name))
+        except KeyError:    # the class is no longer in jug_hpc.toml
+            pass
+    return scheduler_kills([
+        (record, outcome) for i, (record, outcome) in enumerate(ended)
+        if record.class_name in now and i > last_success.get(record.class_name, -1)
+        and record.resources in (None, now[record.class_name])])
+
+
 def _kill_warnings(project, kills):
     '''One warning per class and way of being killed, with the last such job'''
     last = {}
@@ -374,17 +415,14 @@ def _kill_warnings(project, kills):
         last[record.class_name, outcome.outcome] = (record, outcome)
     warnings = []
     for name, by_outcome in kill_counts(kills).items():
-        try:
-            rc = project.get_class(name)
-        except KeyError:    # the class is no longer in jug_hpc.toml
-            rc = None
+        rc = project.get_class(name)
         for kind, n in by_outcome.items():
             record, outcome = last[name, kind]
             jobs = 'job' if n == 1 else 'jobs'
             what = outcome.detail or outcome.outcome.value
             message = (f'{_label(name)}: {n} {jobs} killed {kill_reason(kind)} (the last: job '
                        f'{record.job_id}: {what})')
-            advice = suggestion(outcome, rc) if rc is not None else ''
+            advice = suggestion(outcome, rc)
             warnings.append(f'{message}; {advice}' if advice else message)
     return warnings
 
