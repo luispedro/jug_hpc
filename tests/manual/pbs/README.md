@@ -1,39 +1,46 @@
 # Manual test on a real PBS cluster
 
-These are the checks that CI cannot do (PLAN.md: milestone 2, and milestone 3
-item 7). Each step says what to look for. `collect.sh` saves qstat output to
-`recorded/`, which goes back into `tests/pbs_output/`.
+These are the checks that CI cannot do (PLAN.md: milestone 2, milestone 3
+item 7, and milestone 4). Each step says what to look for. `collect.sh` saves
+qstat output to `recorded/`, which goes back into `tests/pbs_output/`.
 
-Takes about an hour, plus time waiting in the queue. Every command below uses
-`$RPID`, the project to charge jobs to (`qsub -P`): `export RPID=<project>`
+Takes two to three hours, plus time waiting in the queue. Every command below
+uses `$RPID`, the project to charge jobs to (`qsub -P`): `export RPID=<project>`
 first.
 
 ## All at once: `run-everything.sh`
 
-Runs steps 0 to 6 one after the other, unattended, keeping every result in
-this directory. On a login node, in `tmux`/`screen` (or with `nohup`):
+Runs steps 0 to 8 one after the other, unattended, keeping every result in
+this directory. On a login node, from this directory inside an up-to-date
+jug_hpc checkout, in `tmux`/`screen` (or with `nohup`):
 
 ```bash
-export RPID=<project>
-PYTHON=python3.12 ./run-everything.sh /path/to/jug_hpc   # the path is only needed the first time
+RPID=<project> PYTHON=python3.12 ./run-everything.sh
 ```
 
-- It creates `venv/` (with `install.sh`) if there is none, and
-  `~/.config/jug_hpc/cluster.toml` from `cluster.toml.example` (with
-  `-P $RPID`) if there is none. If the site needs more (`account`,
+- A full run starts from scratch: the results of an earlier run, if any, are
+  first moved into `old-results-<date>.tgz`, and `venv/` is recreated (with
+  `install.sh`) from the checkout this directory is in, so the code tested is
+  the checkout's (its commit goes to `recorded/env.txt`). Run from elsewhere,
+  give the checkout: `./run-everything.sh /path/to/jug_hpc [/path/to/jug]`.
+- It creates `~/.config/jug_hpc/cluster.toml` from `cluster.toml.example`
+  (with `-P $RPID`) if there is none. If the site needs more (`account`,
   `partition`, `module load` in `setup`), create that file yourself first (as
   in step 0) and edit it.
 - Its output goes to `run.log`; `recorded/summary.txt` says which steps
-  passed. For step 4, "OK" means the submitter stopped as it should.
+  passed, and `run.log` has an `ok:`/`NOT AS EXPECTED:` line for each thing
+  checked in steps 3 to 8. For steps 4 and 8, "OK" means the submitter
+  stopped as it should.
 - Each wait for jobs (queueing included) is capped at `WAIT` seconds (default
   4 hours).
-- To run it again, first `./run-everything.sh --clean`. To rerun only some
-  steps, adding to the results already here: `STEPS="2" ./run-everything.sh`.
+- To rerun only some steps, adding to the results already here:
+  `STEPS="2" ./run-everything.sh`. `./run-everything.sh --clean` removes the
+  results.
 - It records the queue limits (`qstat -Qf`) in `recorded/queues.txt`, for
   jobs that `qsub` rejects.
 
-Then copy the whole directory back, without `venv/`:
-`rsync -a --exclude venv/ ./ <machine>:<jug_hpc>/tests/manual/pbs/`.
+At the end, everything worth sending back is in `pbs-results.tgz` (no
+jugdirs, no `venv/`).
 
 The steps below are what it does, for running them by hand.
 
@@ -128,6 +135,9 @@ python ../check.py . | tee check.txt
 cd ..
 ```
 
+`run-everything.sh` also runs `jug-hpc status` every 2 minutes during the
+run (`status.log`), and once after it (`status.txt`).
+
 Look for: `submit` ends with `every task is finished` and exit status 0;
 `check.py` says `OK`; `align` and `merge` jobs are submitted only once their
 tasks are ready; no worker waits more than a few minutes between starting and
@@ -145,8 +155,11 @@ ls logs/scheduler/
 cd ..
 ```
 
+Then `jug-hpc status > status.txt 2>&1`.
+
 Look for: it stops after 3 jobs, with an error that the workers keep failing
-and exit status 1. It needs job history: if `submit` keeps submitting, or stops
+and exit status 1; `status` warns that the last jobs of `[default]` ended in
+error. It needs job history: if `submit` keeps submitting, or stops
 without having seen the jobs end, note the site's job history settings
 (step 0).
 
@@ -165,7 +178,9 @@ cd ..
 ```
 
 Look for: as in step 3, in `logs/submitter-<id>.log`. If the job fails at once,
-see `logs/scheduler/`.
+see `logs/scheduler/`. `run-everything.sh` runs `jug-hpc status` every 2
+minutes while the submitter job runs (`status.log`): it should show the
+submitter job.
 
 ## 6. `jug-hpc cancel`
 
@@ -187,16 +202,73 @@ cd ..
 ```
 
 Look for: `cancel` lists the submitter job first, then the workers, and exits
-with status 0; no worker is submitted after it (`logs/submitter-<id>.log`); the
-jobs end deleted (`substate` 91 in `recorded/cancel-t.json`). The messages of
-the last `qdel` (a finished job, an unknown one) are what the backend expects
+with status 0; the submitter's log ends with `stopped by SIGTERM`, and no
+worker is submitted after it (`logs/submitter-<id>.log`); the jobs end deleted
+(`substate` 91 in `recorded/cancel-t.json`). The messages of the last `qdel`
+(a finished job, an unknown one) are what the backend expects
 to ignore: if they differ, `jug-hpc cancel` fails on jobs that have ended.
+
+## 7. Jobs killed by the scheduler, and stale locks
+
+`7-kills` has a `hog` task that touches 3 GB, a `slow` task that sleeps 4
+minutes, and a `final` task (default class) that needs both. With
+`too-small.toml`, `hog` gets 1 GB and `slow` 2 minutes. On PBS, the memory
+kill is the cgroup's OOM killer (SIGKILL: the Jug lock stays), the wall time
+kill a SIGTERM (Jug releases the lock, so the submitter tries again until it
+stops the class after 3 jobs).
+
+```bash
+cd 7-kills
+cp too-small.toml jug_hpc.toml
+jug-hpc submit --interval=30 --max-interval=60 > submit.log 2>&1 &
+# wait until submit.log has '[class.hog]: 1 task is locked' and
+# '[class.slow]: 3 jobs in a row ended in error'
+jug-hpc status > status-during.txt 2>&1
+kill -TERM %1; wait %1; echo "exit status: $?" >> submit.log    # 143
+jug-hpc status > status-stopped.txt 2>&1
+cp fixed.toml jug_hpc.toml
+jug-hpc status --release-stale > release.txt 2>&1
+jug-hpc submit --interval=30 > submit2.log 2>&1; echo "exit status: $?" >> submit2.log
+jug-hpc status > status.txt 2>&1
+../collect.sh kills $(python -c "import json; print(*(j['job_id'] for j in json.load(open('.jug_hpc/jobs.json'))['jobs']))")
+cd ..
+```
+
+Look for, in `submit.log`: a warning for the `hog` job (SIGKILL, with the
+suggestion to raise `memory`) and one per `slow` job (wall time, raise `time`
+or lower `time_fraction`); the stale-lock warning for `hog`; `[class.slow]`
+stopped after 3 jobs; `stopped by SIGTERM` at the end. In
+`status-during.txt`: the kills per class. In `status-stopped.txt`: also that
+`[class.slow]`'s jobs keep failing, and `hog`'s stale lock. `release.txt`:
+`[class.hog]: released the locks of 1 task`. `submit2.log`: `every task is
+finished`, exit status 0. If `hog` is not killed, the site doesn't enforce
+memory (see step 2).
+
+## 8. Failed tasks: the workers left are cancelled
+
+`8-blocked` has a task that raises, two that sleep 2.5 minutes, and one that
+needs all three (3 workers). Once the sleeping ones are done, no task can run;
+the workers still waiting (a few minutes) for the last task are cancelled.
+
+```bash
+cd 8-blocked
+jug-hpc submit --interval=20 --max-interval=20 2>&1 | tee submit.log; echo "exit status: $?" >> submit.log
+jug-hpc status > status.txt 2>&1
+../collect.sh blocked $(python -c "import json; print(*(j['job_id'] for j in json.load(open('.jug_hpc/jobs.json'))['jobs']))")
+cd ..
+```
+
+Look for: `submit` ends with `no task can run: failed tasks`, exit status 1,
+after `default: cancelled job ... no task can run`; the jobs end deleted
+(`recorded/blocked-t.json`).
 
 ## Sending back the results
 
+`run-everything.sh` leaves them in `pbs-results.tgz`. By hand:
+
 ```bash
-tar czf pbs-results.tgz recorded 1-static/dry-run.txt \
-    */submit.log */check.txt */logs 5-exit-status/*.o* 6-cancel/cancel.log 6-cancel/status.txt
+tar czf pbs-results.tgz recorded run.log 1-static/*.txt \
+    */*.log */*.txt */logs */.jug_hpc 5-exit-status/jhpc-* 7-kills/jug_hpc.toml
 ```
 
 Also note anything odd: error messages, jobs rejected by `qsub`, or a step that

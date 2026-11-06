@@ -1,0 +1,16 @@
+# Copied to jug_hpc.toml by run-everything.sh (step 7), once the kills are reported:
+# too-small.toml with what the warnings suggest.
+setup = "source ../venv/bin/activate"
+
+[default]
+memory  = "1G"
+time    = "00:10:00"
+workers = 1
+
+[class.hog]
+match  = "hog"
+memory = "6G"
+
+[class.slow]
+match = "slow"
+time  = "00:10:00"

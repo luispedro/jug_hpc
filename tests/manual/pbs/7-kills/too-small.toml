@@ -1,0 +1,17 @@
+# Copied to jug_hpc.toml by run-everything.sh (step 7), first.
+setup = "source ../venv/bin/activate"
+
+[default]
+memory  = "1G"
+time    = "00:10:00"
+workers = 1
+
+# hog() touches 3 GB
+[class.hog]
+match  = "hog"
+memory = "1G"
+
+# slow() sleeps 4 minutes
+[class.slow]
+match = "slow"
+time  = "00:02:00"

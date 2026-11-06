@@ -470,8 +470,9 @@ CPUs of the worker that ran them).
      `--max-failed-jobs` option if users ask.
 
 **Done when:** a test jugfile with a task that exceeds its memory and one that
-exceeds its wall time produces a correct per-class report on PBS. →
-**Release 0.3.**
+exceeds its wall time produces a correct per-class report on PBS (step 7
+of `tests/manual/pbs/run-everything.sh`, not yet run on a real cluster; step
+8 checks step 7 above). → **Release 0.3.**
 
 ### Milestone 5: second scheduler and 1.0
 

@@ -1,0 +1,8 @@
+setup = "source ../venv/bin/activate"
+
+# 3 workers for bad() and the 2 good(); each waits a few minutes for total()
+# once it has nothing to run
+[default]
+memory  = "1G"
+time    = "00:30:00"
+workers = 3
