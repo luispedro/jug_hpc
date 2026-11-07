@@ -35,7 +35,8 @@ warning about locks left by dead workers and `status --release-stale` removing t
 (step 5), and `check` noting jugdirs that can't detect dead workers (step 6,
 `check.dead_worker_note`), and `status` warning about a class whose last jobs all ended in
 error (`status.failing_jobs`) instead of only saying to run `jug-hpc submit`, and the worker
-log and exception of failed tasks (step 9, `failures.py`).
+log and exception of failed tasks (step 9, `failures.py`), and `submit --cleanup-failed`
+(step 10, `jugstate.cleanup_failed`).
 
 ## Commands
 
@@ -104,7 +105,8 @@ paths replaced by `/home/me/rnaseq`.
   task hashes and dependency indices while the jugfile module is loaded (hashing can pickle
   jugfile functions); `task_counts` feeds them to Jug's `update_status` for per-name
   `TaskCounts` (waiting/ready/running/failed/finished). `release_locks` opens the store
-  from the jugdir (no jugfile load) to remove given locks. Keep Jug-internal access
+  from the jugdir (no jugfile load) to remove given locks; `cleanup_failed` likewise removes
+  every failed lock (`submit --cleanup-failed`). Keep Jug-internal access
   confined here. Modules imported by the jugfile stay cached across in-process loads, so
   the submitter must load in a subprocess: `subprocess_task_counts` runs `python -P -m
   jug_hpc.jugstate counts` (through a `Runner`) and parses its JSON (versioned,

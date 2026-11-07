@@ -129,6 +129,13 @@ def test_config_unknown_scheduler(config_env, capsys):
     assert err.startswith(f"jug-hpc: error: {user}: unknown scheduler 'slurmm' (")
 
 
+def test_cleanup_failed_not_with_dry_run(tmp_path, capsys):
+    with pytest.raises(SystemExit) as e:
+        main(['-C', str(tmp_path), 'submit', '--dry-run', '--cleanup-failed'])
+    assert e.value.code == 2
+    assert '--cleanup-failed: not with --dry-run' in capsys.readouterr().err
+
+
 def test_project_dir_must_exist(tmp_path, capsys):
     with pytest.raises(SystemExit) as e:
         main(['-C', str(tmp_path / 'missing'), 'config'])

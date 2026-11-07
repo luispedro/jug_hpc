@@ -57,7 +57,9 @@ def build_parser():
             'would submit them are printed instead. With --as-job, the '
             'submitter itself is submitted as a job (with the resources of '
             '[submitter] in jug_hpc.toml, which must set its wall time), '
-            'logging to logs/submitter-<job id>.log.'))
+            'logging to logs/submitter-<job id>.log. With --cleanup-failed, the '
+            "failed tasks run again (as after 'jug cleanup --failed-only'): use "
+            'it once their problem is fixed.'))
     status = commands.add_parser(
         'status',
         help='show the tasks and workers of each class, and jobs killed by the scheduler',
@@ -94,6 +96,10 @@ def build_parser():
     mode.add_argument('--as-job', action='store_true',
                       help='submit the submitter as a job, and exit')
     submit.add_argument(
+        '--cleanup-failed', action='store_true',
+        help="first remove the failed marks of the failed tasks, as 'jug cleanup "
+             "--failed-only' does, so they run again (not with --dry-run)")
+    submit.add_argument(
         '--interval', type=_positive_seconds, metavar='SECONDS', default=None,
         help='seconds between polls (default: 60)')
     submit.add_argument(
@@ -128,6 +134,8 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == 'submit':
+        if args.dry_run and args.cleanup_failed:
+            parser.error('--cleanup-failed: not with --dry-run (which changes nothing)')
         if args.all or args.dry_run:
             if args.interval is not None:
                 parser.error('--interval: only without --all and --dry-run')
@@ -413,6 +421,8 @@ def _submit_static(args, start):
         cluster = load_cluster_settings(project_dir)
         project = load_project_settings(project_dir)
         scheduler = create_scheduler(cluster)
+        if args.cleanup_failed:
+            _cleanup_failed(project, print)
         state = load_project(project)
         prep = prepare(cluster, project, state, scheduler,
                        classes=args.classes or None)
@@ -517,6 +527,8 @@ def _poll(args, start):
         for warning in submitter.warnings:
             _message('warning', warning)
         with _sigterm_raises(), project_state.submitter_lock():
+            if args.cleanup_failed:
+                _cleanup_failed(project, _log)
             result = run(submitter, interval=interval, max_interval=args.max_interval,
                          on_poll=on_poll, on_failure=on_failure)
     except (ConfigError, SchedulerError, StateError) as e:
@@ -637,9 +649,17 @@ def _report_end(report, logs='logs', failures=()):
     for note in failures:
         _message('note', note)
     if not failures:
-        _message('note', 'the worker logs say why the tasks failed; once fixed, '
-                         "'jug cleanup --failed-only' lets them run again")
+        _message('note', "the worker logs say why the tasks failed; once fixed, run "
+                         "'jug-hpc submit --cleanup-failed' to run them again")
     return 1
+
+
+def _cleanup_failed(project, out):
+    '''``--cleanup-failed``: remove the failed marks, saying how many with ``out``'''
+    from .jugstate import project_cleanup_failed
+    n = project_cleanup_failed(project)
+    out(f'cleaned up {n} failed task{"s" if n != 1 else ""} (as '
+        "'jug cleanup --failed-only')")
 
 
 def _failure_notes(project, classifier, counts, project_dir):
@@ -760,7 +780,8 @@ def _submit_as_job(args, start):
                    f'(job {ids}); nothing submitted')
             return 1
         with project_state.submitter_lock():
-            pass
+            if args.cleanup_failed:
+                _cleanup_failed(project, print)
 
         counted = project_task_counts(project)
         report = progress(counts_by_class(submitter.classifier, counted.counts),

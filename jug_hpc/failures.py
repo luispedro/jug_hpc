@@ -231,6 +231,6 @@ def failure_messages(failed, found, class_of, get_class, logs):
             message += f'; {text}'
         messages.append(message)
     if messages:
-        messages.append("once fixed, 'jug cleanup --failed-only' lets the failed tasks "
-                        'run again')
+        messages.append("once fixed, run 'jug-hpc submit --cleanup-failed' to run the "
+                        "failed tasks again (or 'jug cleanup --failed-only' first)")
     return messages

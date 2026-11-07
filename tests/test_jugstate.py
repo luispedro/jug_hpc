@@ -12,9 +12,11 @@ from jug_hpc.jugstate import (
     JugfileError,
     TaskCounts,
     _main,
+    cleanup_failed,
     default_jugdir,
     load_jugfile,
     load_project,
+    project_cleanup_failed,
     project_release_locks,
     project_task_counts,
     release_locks,
@@ -429,6 +431,33 @@ def test_project_release_locks(project):
     counted = project_task_counts(settings)
     assert project_release_locks(settings, counted.locked['simple.load']) == (
         load.hash().decode(),)
+    assert not lock.is_locked()
+
+
+def test_cleanup_failed(project):
+    state = load_jugfile('simple.py', cwd=project)
+    loads = [t for t in state.tasks if t.name == 'simple.load']
+    for t in loads:
+        state.store.getlock(t.hash()).get()
+    state.store.getlock(loads[0].hash()).fail()
+    state.store.getlock(loads[2].hash()).fail()
+    assert task_counts(state)['simple.load'] == TaskCounts(running=1, failed=2)
+    # only the failed locks, as 'jug cleanup --failed-only'
+    assert cleanup_failed('simple.py', None, cwd=project) == 2
+    assert task_counts(state)['simple.load'] == TaskCounts(ready=2, running=1)
+    assert cleanup_failed('simple.py', None, cwd=project) == 0
+
+
+def test_project_cleanup_failed(project):
+    (project / 'jug_hpc.toml').write_text(
+        'jugfile = "simple.py"\njugdir = "store"\n'
+        '[default]\nmemory = "1G"\ntime = "1:00:00"\n')
+    settings = load_project_settings(project)
+    state = load_project(settings)
+    lock = state.store.getlock(state.tasks[0].hash())
+    lock.get()
+    lock.fail()
+    assert project_cleanup_failed(settings) == 1
     assert not lock.is_locked()
 
 

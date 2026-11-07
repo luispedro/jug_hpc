@@ -116,6 +116,7 @@ def test_failure_messages():
         "whose worker was killed while running it is counted as failed after 30 minutes "
         "with the 'file_keepalive' jugdir, and 'jug-hpc status' lists the jobs killed by "
         "the scheduler; or a 'jug execute' outside jug-hpc ran it)"),
-        "once fixed, 'jug cleanup --failed-only' lets the failed tasks run again",
+        ("once fixed, run 'jug-hpc submit --cleanup-failed' to run the failed tasks again "
+         "(or 'jug cleanup --failed-only' first)"),
     ]
     assert failure_messages({}, found, class_of, classes.__getitem__, 'logs') == []

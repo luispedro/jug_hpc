@@ -505,6 +505,20 @@ CPUs of the worker that ran them).
      30 min, which the "no log says why" note mentions).
    - Parsing Jug's log text is fragile; a `jug execute --task-log` (Smart
      limits, phase A) would tie failures to jobs exactly.
+10. Done (2026-11-07, asked for with step 9): `jug-hpc submit --cleanup-failed`
+    removes the failed marks before running, instead of asking the user to run
+    `jug cleanup --failed-only`. Decisions:
+    - In-process (`jugstate.cleanup_failed`, Jug's own loop over
+      `store.listlocks()`/`is_failed()`/`release()`, as `release_locks`):
+      no jugfile load, and no `jug` executable needed on the login node.
+    - Under the submitter lock (so never while another submitter runs).
+      `--as-job`: before the job is submitted (inside the lock check), not in
+      the job, so the blocked-run check sees the cleaned state. `--all`:
+      before counting. `--dry-run`: a usage error (it changes nothing).
+    - All failed tasks, no per-class/name selection (as Jug's command); add
+      one if users ask. Store errors are not caught (as `--release-stale`).
+    - The failure notes now suggest it (`jug cleanup --failed-only` kept as
+      the alternative).
 
 **Done when:** a test jugfile with a task that exceeds its memory and one that
 exceeds its wall time produces a correct per-class report on PBS. → **Release

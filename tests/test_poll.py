@@ -1057,8 +1057,8 @@ def test_cli_submit_blocked(tmp_path, monkeypatch, capsys):
                    'tasks waiting for them: [class.middle] 1\n'
                    f'jug-hpc: note: [default]: jugfile.first: 1 task failed; '
                    f'logs/default-{first_log}.log says: ValueError: no\n'
-                   "jug-hpc: note: once fixed, 'jug cleanup --failed-only' lets the failed "
-                   'tasks run again\n')
+                   "jug-hpc: note: once fixed, run 'jug-hpc submit --cleanup-failed' to run "
+                   "the failed tasks again (or 'jug cleanup --failed-only' first)\n")
 
     # jug-hpc status says it too
     assert main(['-C', str(project_dir), 'status']) == 0
@@ -1067,7 +1067,18 @@ def test_cli_submit_blocked(tmp_path, monkeypatch, capsys):
         'jug-hpc: note: no task can run: failed tasks: [default] 1',
         (f'jug-hpc: note: [default]: jugfile.first: 1 task failed; logs/default-{first_log}.log '
         'says: ValueError: no'),
-        "jug-hpc: note: once fixed, 'jug cleanup --failed-only' lets the failed tasks run again"]
+        ("jug-hpc: note: once fixed, run 'jug-hpc submit --cleanup-failed' to run the failed "
+         "tasks again (or 'jug cleanup --failed-only' first)")]
+
+    # fixed: --cleanup-failed runs the failed task again, and the run finishes
+    jugfile = project_dir / 'jugfile.py'
+    jugfile.write_text(jugfile.read_text().replace("raise ValueError('no')", 'pass'))
+    assert main(['-C', str(project_dir), 'submit', '--interval=0.2', '--cleanup-failed']) == 0
+    out, err = capsys.readouterr()
+    lines = [line.split('] ', 1)[1] for line in out.splitlines()]
+    assert lines[0] == "cleaned up 1 failed task (as 'jug cleanup --failed-only')"
+    assert lines[-1] == 'every task is finished'
+    wait_for_jobs(sched, [r.job_id for r in ProjectState(project_dir).jobs()])
 
 
 @needs_bash
@@ -1497,6 +1508,35 @@ def test_cli_submit_as_job(tmp_path, monkeypatch, capsys):
     assert out.endswith('] every task is finished\n')
     assert err == 'jug-hpc: note: no submitter job submitted\n'
     assert len(ProjectState(project_dir).jobs()) == 2
+
+
+def test_cli_submit_as_job_cleanup_failed(tmp_path, monkeypatch, capsys):
+    '''--cleanup-failed cleans up before the job is submitted, not in it'''
+    project_dir, sched = local_project(tmp_path, monkeypatch, DOUBLE, AS_JOB_PROJECT)
+    state = load_project(load_project_settings(project_dir))
+    for t in state.tasks:
+        lock = state.store.getlock(t.hash())
+        lock.get()
+        lock.fail()
+    assert main(['-C', str(project_dir), 'submit', '--as-job']) == 1
+    capsys.readouterr()
+    assert not ProjectState(project_dir).jobs()
+
+    status = main(['-C', str(project_dir), 'submit', '--as-job', '--cleanup-failed',
+                   '--interval=0.2'])
+    out, err = capsys.readouterr()
+    assert status == 0, err
+    assert out.splitlines() == [
+        "cleaned up 3 failed tasks (as 'jug cleanup --failed-only')",
+        ('submitter: submitted job 1 (.jug_hpc/scripts/submitter-1.sh); it logs to '
+         'logs/submitter-<job id>.log')]
+    script = (project_dir / '.jug_hpc' / 'scripts' / 'submitter-1.sh').read_text()
+    assert 'exec jug-hpc submit --interval=0.2\n' in script
+    wait_for_jobs(sched, ['1'])
+    records = ProjectState(project_dir).jobs()
+    wait_for_jobs(sched, [r.job_id for r in records])
+    log = (project_dir / 'logs' / 'submitter-1.log').read_text()
+    assert log.rstrip('\n').endswith('] every task is finished'), log
 
 
 def test_cli_submit_as_job_needs_time(tmp_path, monkeypatch, capsys):

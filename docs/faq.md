@@ -22,8 +22,9 @@ counts that task as running until you remove the lock (the submitter and
 `jug-hpc status` warn about such locks, and `jug-hpc status --release-stale`
 removes them). With
 `file_keepalive`,
-a lock that hasn't been refreshed for 30 minutes counts as failed. `jug
-cleanup --failed-only` then removes it, so the task can run again. See Jug's
+a lock that hasn't been refreshed for 30 minutes counts as failed.
+`jug-hpc submit --cleanup-failed` (or `jug cleanup --failed-only`) then
+removes it, so the task can run again. See Jug's
 [backends documentation](https://jug.readthedocs.io/en/latest/backends.html).
 
 `jug-hpc check` adds a note when the jugdir can't detect dead workers: Jug's

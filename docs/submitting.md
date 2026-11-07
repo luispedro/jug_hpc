@@ -58,8 +58,7 @@ It stops:
 - when no task is ready or running and some have failed, so that the tasks
   still waiting can never run (exit status 1). It lists the failed tasks per
   class, and why they failed (see [Failed tasks](#failed-tasks)). Once you
-  have fixed the problem, `jug cleanup --failed-only` lets the failed tasks
-  run again, and you can start `jug-hpc submit` again;
+  have fixed the problem, `jug-hpc submit --cleanup-failed` runs them again;
 - when the only tasks that could run belong to classes whose workers keep
   failing (exit status 1; see [Workers that keep
   failing](#workers-that-keep-failing)).
@@ -81,16 +80,16 @@ finished, the workers left exit at once, so they are not cancelled.
 ### Failed tasks
 
 A task that raises an exception is *failed*: its worker writes the traceback
-to its log and exits, and Jug does not run the task again until `jug cleanup
---failed-only` (workers run `jug execute --keep-failed`). For each task name
+to its log and exits, and Jug does not run the task again until its failed
+mark is removed (workers run `jug execute --keep-failed`). For each task name
 with failed tasks, the submitter names the worker log that says why, with the
 exception (the last line of the traceback):
 
 ```
-[2026-11-07 10:53:52] middle: cancelled job 2 (running): no task can run
+[2026-11-07 10:56:16] middle: cancelled job 2 (running): no task can run
 jug-hpc: error: no task can run: failed tasks: [default] 1; tasks waiting for them: [class.middle] 1
-jug-hpc: note: [default]: jugfile.first: 1 task failed; logs/default-1-1.log says: ValueError: no
-jug-hpc: note: once fixed, 'jug cleanup --failed-only' lets the failed tasks run again
+jug-hpc: note: [default]: jugfile.first: 1 task failed; logs/default-1-2.log says: ValueError: no
+jug-hpc: note: once fixed, run 'jug-hpc submit --cleanup-failed' to run the failed tasks again (or 'jug cleanup --failed-only' first)
 ```
 
 The log is found by its contents (Jug's `Exception while running
@@ -105,6 +104,26 @@ failed after 30 minutes (see [Workers killed by the
 scheduler](#workers-killed-by-the-scheduler) for why it was killed).
 
 `jug-hpc status` gives the same notes.
+
+Once you have fixed the problem, `jug-hpc submit --cleanup-failed` first
+removes the failed marks, as `jug cleanup --failed-only` does (without loading
+the jugfile), and then runs as usual:
+
+```
+$ jug-hpc submit --cleanup-failed
+[2026-11-07 10:56:17] cleaned up 1 failed task (as 'jug cleanup --failed-only')
+[2026-11-07 10:56:17] default: submitted job 3 (1 worker, .jug_hpc/scripts/default-2.sh)
+[2026-11-07 10:56:17] tasks: 1 waiting, 1 ready, 0 running, 0 failed, 2 finished; workers queued or running: 2
+...
+[2026-11-07 10:56:19] every task is finished
+```
+
+It removes the marks only once it holds the project's lock (so never while
+another submitter runs). With `--as-job`, they are removed before the job is
+submitted (the job itself does not remove any); with `--all`, before the
+tasks are counted; it can't be combined with `--dry-run`. Every failed task is
+run again, so use it once the cause of every failure is fixed: a task that
+fails again simply stops the run again.
 
 ### Workers that keep failing
 

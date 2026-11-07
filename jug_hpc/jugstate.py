@@ -23,6 +23,10 @@ are still locked and not failed; it opens the jugdir without loading the
 jugfile, so it takes little time (``jug-hpc status --release-stale`` asks the
 scheduler about the workers just before calling it).
 
+:func:`cleanup_failed` removes the locks of every failed task, as ``jug
+cleanup --failed-only`` does (``jug-hpc submit --cleanup-failed``), also
+without loading the jugfile.
+
 :func:`task_counts` counts the tasks of a loaded jugfile in each state
 (waiting, ready, running, failed, finished) with the function behind ``jug
 status`` (``update_status`` in ``jug.subcommands.status``), so the counts are
@@ -46,9 +50,11 @@ __all__ = [
     'JugfileError',
     'SubprocessCounts',
     'TaskCounts',
+    'cleanup_failed',
     'default_jugdir',
     'load_jugfile',
     'load_project',
+    'project_cleanup_failed',
     'project_release_locks',
     'project_task_counts',
     'release_locks',
@@ -349,28 +355,67 @@ def release_locks(jugfile, jugdir, hashes, cwd=None):
     released : tuple of str
         The hashes whose lock was removed, in the order given
     '''
+    hashes = list(hashes)
+    for h in hashes:
+        if not (isinstance(h, str) and _HASH_RE.fullmatch(h)):
+            raise ValueError(f'not a task hash: {h!r}')
+    released = []
+    with _store(jugfile, jugdir, cwd) as store:
+        for h in hashes:
+            lock = store.getlock(h)
+            if lock.is_locked() and not lock.is_failed():
+                lock.release()
+                released.append(h)
+    return tuple(released)
+
+
+def project_cleanup_failed(settings):
+    ''':func:`cleanup_failed` for a project (a ``ProjectSettings``)'''
+    return cleanup_failed(settings.jugfile, settings.jugdir, cwd=settings.project_dir)
+
+
+def cleanup_failed(jugfile, jugdir, cwd=None):
+    '''Remove the locks of the failed tasks, as ``jug cleanup --failed-only`` does
+
+    The jugfile is not loaded (nor is it by Jug for this), so this is quick;
+    the failed tasks become ready again (or waiting, for their dependencies).
+
+    Parameters
+    ----------
+    jugfile, jugdir, cwd
+        As for :func:`load_jugfile` (the jugfile only gives the default
+        jugdir)
+
+    Returns
+    -------
+    removed : int
+        How many locks were removed
+    '''
+    removed = 0
+    with _store(jugfile, jugdir, cwd) as store:
+        for name in list(store.listlocks()):
+            lock = store.getlock(name)
+            if lock.is_failed():
+                lock.release()
+                removed += 1
+    return removed
+
+
+@contextlib.contextmanager
+def _store(jugfile, jugdir, cwd):
+    '''The store of ``jugdir``, opened from ``cwd`` (as ``jug.init`` would open it)'''
     from jug.backends import select
     cwd = Path.cwd() if cwd is None else Path(cwd).absolute()
     if jugdir is None:
         jugdir = default_jugdir(cwd / jugfile)
     elif isinstance(jugdir, Path):
         jugdir = str(cwd / jugdir)
-    hashes = list(hashes)
-    for h in hashes:
-        if not (isinstance(h, str) and _HASH_RE.fullmatch(h)):
-            raise ValueError(f'not a task hash: {h!r}')
-    released = []
     with contextlib.chdir(cwd):
         store = select(jugdir)
         try:
-            for h in hashes:
-                lock = store.getlock(h)
-                if lock.is_locked() and not lock.is_failed():
-                    lock.release()
-                    released.append(h)
+            yield store
         finally:
             store.close()
-    return tuple(released)
 
 
 def project_task_counts(settings, *, runner=None, timeout=None):
