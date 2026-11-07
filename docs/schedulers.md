@@ -67,6 +67,7 @@ How a job ended is read from its `Exit_status` (and `substate`):
 | `-27`, `-26` | killed for memory |
 | `128 + N` or `256 + N` | killed by signal `N` |
 | `137` or `265` (SIGKILL) | killed by SIGKILL, *probably for using more memory than requested* |
+| `1` to `128`, with memory use at 90% of the job's `mem` or more | killed for memory: *a process it ran was probably killed for using more memory than requested* |
 | substate 91 (or, for the workers of an array that was not running yet, the array's) | deleted with `qdel` |
 | other values | failed, with that exit status |
 
@@ -76,6 +77,17 @@ records nothing but the SIGKILL (the job's PBS output file, in
 `logs/scheduler/`, may say more). PBS measures memory use only now and then,
 so the last measurement is shown (`last measured use: ... of ...`) only when
 it reached at least half the job's memory.
+
+The kernel may kill a process that a task runs (a program started with
+`subprocess`, a process pool's worker) rather than Jug itself. The task then
+fails, Jug exits with status 1, and PBS records an ordinary failure; the job's
+error file in `logs/scheduler/` may say `cgroup/OOM: Killed because of memory
+limit`. So a job that failed after using at least 90% of its memory (PBS's
+`resources_used.mem`, its peak with cgroups) counts as killed for memory, with
+the memory suggestion. This is a guess too: memory use includes the page
+cache, so a job that reads much data and fails for another reason may be
+counted wrongly. The failed task's note (see
+[Failed tasks](submitting.md#failed-tasks)) says what the task's exception was.
 
 ### Raw options
 

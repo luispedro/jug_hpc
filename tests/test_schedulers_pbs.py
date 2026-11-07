@@ -591,6 +591,42 @@ def test_sigkill_memory_use_shown_near_limit(used, limit, shown):
     assert ('last measured use' in detail) == shown
 
 
+# from a real job (PBS Professional 2026.1, cgroup hook): the OOM killer killed
+# a process the task ran ('cgroup/OOM: Killed because of memory limit' in its
+# error file), the task failed and Jug exited 1
+OOM_CHILD = {'Exit_status': 1, 'substate': 93,
+             'resources_used': {'cput': '38:22:47', 'mem': '133722672kb',
+                                'walltime': '04:07:47', 'ncpus': 20},
+             'Resource_List': {'mem': '128gb', 'walltime': '48:00:00', 'ncpus': 20}}
+
+
+def test_failed_at_memory_limit_is_memory_kill():
+    assert element_outcome(OOM_CHILD) == JobOutcome(
+        Outcome.KILLED_MEMORY, 1, None,
+        'exit status 1, with memory use at its limit (133722672kb of 128gb): a process it '
+        'ran was probably killed for using more memory than requested')
+
+
+@pytest.mark.parametrize('status, used, outcome', [
+    (1, '121000000kb', Outcome.KILLED_MEMORY),     # 90% of 128gb is 120795955kb
+    (1, '120000000kb', Outcome.FAILED),
+    (3, '128gb', Outcome.KILLED_MEMORY),
+    (1, '0kb', Outcome.FAILED),
+    (1, None, Outcome.FAILED),
+    (-1, '128gb', Outcome.FAILED),       # a PBS error, not the job's status
+    (271, '128gb', Outcome.KILLED_SIGNAL),
+])
+def test_failed_at_memory_limit(status, used, outcome):
+    attrs = {**OOM_CHILD, 'Exit_status': status,
+             'resources_used': {**OOM_CHILD['resources_used'], 'mem': used}}
+    if used is None:
+        del attrs['resources_used']['mem']
+    assert element_outcome(attrs).outcome is outcome
+    # the array's limits are used when the element lists none
+    del attrs['Resource_List']
+    assert element_outcome(attrs, limits=OOM_CHILD['Resource_List']).outcome is outcome
+
+
 @pytest.mark.parametrize('raw', [
     {},
     {'select': {'ngpus': 2, 'mpiprocs': 4}, 'resources': {'place': 'pack'},

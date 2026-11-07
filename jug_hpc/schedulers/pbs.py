@@ -81,7 +81,17 @@ substate 91 (a running Jug worker exits with ``1``: Jug turns ``SIGTERM`` into
 substate 91, but its elements in substate 92 with no ``Exit_status``, so such
 elements count as deleted when their array is; a job over its memory is killed by the cgroup's OOM killer, which
 PBS shows only as ``137`` (SIGKILL), so it is reported as a SIGKILL that is
-probably a memory kill. ``Exit_status`` may be an integer or a string
+probably a memory kill. When the OOM killer kills a process that a task runs
+rather than Jug itself, the task fails and Jug exits ``1``, an ordinary
+failure (seen on PBS Professional 2026.1 with the cgroup hook: ``Exit_status
+1``, ``mem=133722672kb`` of ``128gb``, and ``cgroup/OOM: Killed because of
+memory limit`` in the job's error file). So a job that failed with an exit
+status of 1 to 128 after using at least :data:`MEMORY_AT_LIMIT` of its
+requested memory (``resources_used.mem``, the peak with the cgroup hook)
+counts as killed for memory. Memory use also counts the page cache, which the
+kernel shrinks before killing anything, so a job that failed for another
+reason while reading much data may be counted wrongly; its detail says
+"probably". ``Exit_status`` may be an integer or a string
 (``"-29"``). The other codes are from the documentation and OpenPBS's sources.
 
 Jobs are cancelled with ``qdel JOB...`` (:data:`QSTAT_BATCH` jobs per call;
@@ -120,6 +130,7 @@ from .base import (
 __all__ = [
     'JOB_NAME_MAX',
     'JOB_STATES',
+    'MEMORY_AT_LIMIT',
     'PBS_EXIT_CODES',
     'QSTAT_BATCH',
     'QSTAT_TIMEOUT',
@@ -190,6 +201,10 @@ JOB_STATES = {
     'X': JobState.FINISHED,    # array element: finished
     'M': JobState.UNKNOWN,     # moved to another server
 }
+
+#: The fraction of its requested memory a failed job must have used to count
+#: as killed for memory (a process it ran was killed by the OOM killer)
+MEMORY_AT_LIMIT = 0.9
 
 #: PBS's own (negative) exit statuses, as in OpenPBS's ``job.h``: code ->
 #: (Outcome, explanation). Codes not listed are other PBS errors that kept the
@@ -560,9 +575,15 @@ def element_outcome(attrs, limits=None, array_deleted=False):
     if used_s is not None and limit_s is not None and used_s >= limit_s:
         return JobOutcome(Outcome.KILLED_TIME, status, signum,
                           f'wall time limit reached (used {used} of {limit}); {cause}')
+    used_mem = _resource(attrs, 'resources_used', 'mem')
+    mem = _resource(attrs, 'Resource_List', 'mem') or (limits or {}).get('mem')
+    if outcome is Outcome.FAILED and 0 < status <= 128 and _near_limit(used_mem, mem,
+                                                                       MEMORY_AT_LIMIT):
+        return JobOutcome(Outcome.KILLED_MEMORY, status, None,
+                          f'{cause}, with memory use at its limit ({used_mem} of {mem}): '
+                          'a process it ran was probably killed for using more memory '
+                          'than requested')
     if outcome is Outcome.KILLED_SIGNAL:
-        used_mem = _resource(attrs, 'resources_used', 'mem')
-        mem = _resource(attrs, 'Resource_List', 'mem') or (limits or {}).get('mem')
         if signum == signal.SIGKILL:
             # cgroup OOM kills show only as SIGKILL; memory use is sampled, so
             # the last measurement may be well below the limit (even 0kb), and
@@ -587,10 +608,10 @@ def _pbs_bytes(size):
         return None
 
 
-def _near_limit(used, limit):
-    '''Memory use ``used`` was measured at half its ``limit`` or more (PBS sizes)'''
+def _near_limit(used, limit, fraction=0.5):
+    '''Memory use ``used`` was measured at ``fraction`` of its ``limit`` or more (PBS sizes)'''
     used, limit = _pbs_bytes(used), _pbs_bytes(limit)
-    return used is not None and limit is not None and 2 * used >= limit
+    return used is not None and bool(limit) and used >= fraction * limit
 
 
 def array_exit_outcome(attrs):

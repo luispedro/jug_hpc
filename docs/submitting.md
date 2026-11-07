@@ -97,7 +97,10 @@ jugfile.first: ...` line), as Jug does not record which job ran a task: with
 several failed tasks of one name, the newest log (by modification time) that
 records such a failure is named, with how many logs do. For a `MemoryError`
 (raised where memory is limited by `ulimit`, not by cgroups), the note adds
-`it ran out of memory: raise memory (now 4G)`; for a full disk or a disk quota
+`it ran out of memory: raise memory (now 4G)`; for a process the task ran
+that was killed with `SIGKILL` (`died with <Signals.SIGKILL: 9>`, `exit status
+137`, `BrokenProcessPool`), which is how the kernel kills a job over its
+memory with cgroups, it suggests raising `memory` too; for a full disk or a disk quota
 it says so. A failed task whose failure no log records is noted too: with the
 `file_keepalive:` jugdir, the lock of a task whose worker was killed counts as
 failed after 30 minutes (see [Workers killed by the
@@ -192,7 +195,9 @@ described above.
 On clusters that enforce memory limits with cgroups, a worker that runs out of
 memory is killed with `SIGKILL` and the scheduler records nothing else (see
 {doc}`schedulers`), so a job killed by `SIGKILL` gets the memory suggestion
-too, as a guess. Jobs you delete yourself (`qdel`) are not reported. An array
+too, as a guess. When the process killed is one that a task runs, rather than
+the worker, the job only fails; on PBS, a job that failed after using 90% or
+more of its memory is reported as killed for memory as well. Jobs you delete yourself (`qdel`) are not reported. An array
 job is reported once, by its worst worker (killed for memory before killed for
 wall time); the warning lists how each of its workers that did not succeed
 ended. The values in the suggestion are the class's current ones. The local

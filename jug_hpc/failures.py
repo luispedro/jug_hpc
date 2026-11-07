@@ -21,9 +21,12 @@ was since cleaned up and ran again is found too, if no newer log records one.
 The error shown is the last line of the traceback (``ValueError: no``; with
 chained exceptions, the one raised last), or Jug's message if there is no
 traceback. :func:`advice` adds what to change for a few common causes: a
-``MemoryError`` (raise the class's ``memory``; jobs killed for memory by the
-scheduler are reported from the scheduler's records instead, see
-:mod:`jug_hpc.kills`), and a full disk or a disk quota.
+``MemoryError``, or a process the task ran that was killed with ``SIGKILL``
+(as the kernel's OOM killer does when a job goes over its memory with
+cgroups; the scheduler may then record only that the job failed, see
+:mod:`jug_hpc.schedulers.pbs`): raise the class's ``memory``; and a full disk
+or a disk quota. Jobs killed for memory as a whole are reported from the
+scheduler's records instead (:mod:`jug_hpc.kills`).
 
 A task can be failed with no log saying why: with the ``file_keepalive``
 backend, Jug counts the lock of a task whose worker died (e.g., killed by the
@@ -52,6 +55,12 @@ __all__ = [
 _MARKER = 'Exception while running '
 _FAILED = re.compile(re.escape(_MARKER) + r'(\S+):\s?(.*)$')
 _TRACEBACK = 'Traceback (most recent call last):'
+
+#: A process that a task ran was killed with SIGKILL: ``subprocess`` (``died
+#: with <Signals.SIGKILL: 9>``, or a shell's ``exit status 137``), or a
+#: ``concurrent.futures`` pool whose worker died (``BrokenProcessPool``)
+_SIGKILLED = re.compile(r'<Signals\.SIGKILL: 9>|non-zero exit status (137|-9)\b|'
+                        r'^\S*BrokenProcessPool\b')
 
 
 @dataclass(frozen=True)
@@ -174,10 +183,13 @@ def advice(error, rc):
         Empty if there is nothing to suggest
     '''
     kind = error.split(':', 1)[0]
+    memory = ('raise memory' if rc is None or rc.memory is None
+              else f'raise memory (now {format_memory(rc.memory)})')
     if kind.endswith('MemoryError'):     # also numpy's _ArrayMemoryError
-        if rc is None or rc.memory is None:
-            return 'it ran out of memory: raise memory'
-        return f'it ran out of memory: raise memory (now {format_memory(rc.memory)})'
+        return f'it ran out of memory: {memory}'
+    if _SIGKILLED.search(error):
+        return ('a process it ran was killed with SIGKILL, which is how the kernel kills '
+                f'a job over its memory: if it used more memory than requested, {memory}')
     if '[Errno 28]' in error or 'No space left on device' in error:
         return 'a disk is full'
     if '[Errno 122]' in error or 'Disk quota exceeded' in error:

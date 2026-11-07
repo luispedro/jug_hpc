@@ -375,6 +375,19 @@ CPUs of the worker that ran them).
    - The memory guess for a SIGKILL showed "(last measured use: 0kb of
      1gb)" on the real cluster (PBS samples memory use, and missed it): the
      measurement is shown only when it is at least half the limit.
+   - Found on a real run (2026-11-07): the cgroup OOM killer killed a
+     process a task ran (not Jug), so the task failed, Jug exited 1 and PBS
+     recorded `Exit_status 1` (`mem=133722672kb` of `128gb`; the job's `.ER`
+     file: `cgroup/OOM: Killed because of memory limit`). Nothing was
+     reported. Now a PBS job that failed with status 1-128 and used at least
+     `pbs.MEMORY_AT_LIMIT` (90%) of its `mem` is `KILLED_MEMORY` ("a process
+     it ran was probably killed ..."), and `failures.advice` suggests raising
+     `memory` for an exception showing a SIGKILLed child (`<Signals.SIGKILL:
+     9>`, `exit status 137`, `BrokenProcessPool`). Not done: reading the
+     scheduler's `.ER` file (its message is from the site's cgroup hook, and
+     the file name is backend- and site-specific). To do: a step in
+     `tests/manual/pbs/` with a task whose subprocess goes over its memory, to
+     record this `qstat` output at the next release check.
    - Noticed while documenting it: a job that ran tasks and was then killed
      for wall time counts towards `MAX_FAILED_JOBS` when no task of the class
      ended between the poll before and the one that sees it end (step 8

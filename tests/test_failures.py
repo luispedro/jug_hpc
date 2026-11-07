@@ -92,6 +92,21 @@ def test_advice():
     assert advice("OSError: [Errno 122] Disk quota exceeded: 'out'", BIG) == \
         'a disk quota is exceeded'
     assert advice('ValueError: no', BIG) == ''
+    killed = ('a process it ran was killed with SIGKILL, which is how the kernel kills a '
+              'job over its memory: if it used more memory than requested, raise memory '
+              '(now 4G)')
+    for error in [
+            ("subprocess.CalledProcessError: Command '['racon', 'x']' died with "
+            '<Signals.SIGKILL: 9>.'),
+            ("subprocess.CalledProcessError: Command 'racon x | gzip' returned non-zero exit "
+            'status 137.'),
+            ('concurrent.futures.process.BrokenProcessPool: A process in the process pool '
+            'was terminated abruptly while the future was running or pending.')]:
+        assert advice(error, BIG) == killed, error
+    assert advice("CalledProcessError: Command 'x' returned non-zero exit status 1.",
+                  BIG) == ''
+    assert advice("CalledProcessError: Command 'x' returned non-zero exit status 1370.",
+                  BIG) == ''
 
 
 def test_failure_messages():
