@@ -147,6 +147,8 @@ class PollResult:
         before, and were not reported since that began
     output : str
         What the jugfile wrote while it was loaded
+    by_name : dict
+        Task name -> TaskCounts (see :func:`jug_hpc.jugstate.task_counts`)
     '''
     by_class: dict
     hit_barrier: bool
@@ -160,6 +162,7 @@ class PollResult:
     cancel_error: object = None
     stale_locks: dict = field(default_factory=dict)
     output: str = ''
+    by_name: dict = field(default_factory=dict)
 
 
 class Submitter:
@@ -275,7 +278,8 @@ class Submitter:
         self.reported_locks = (self.reported_locks | stale_locks.keys()) & locked
         self.locked = locked
         result = PollResult(by_class, counted.hit_barrier, active, report, stopped, ended,
-                            stale_locks=stale_locks, output=counted.output)
+                            stale_locks=stale_locks, output=counted.output,
+                            by_name=counted.counts)
         if report.progress in (Progress.BLOCKED, Progress.STALLED):
             self._cancel_idle(result, active_jobs(records, statuses, now), statuses)
         if report.progress is not Progress.RUNNING:

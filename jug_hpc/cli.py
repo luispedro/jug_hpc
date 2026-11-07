@@ -291,9 +291,11 @@ def cmd_status(args, start):
             lock_holder = project_state.submitter_lock_holder()
             counted = project_task_counts(project)
             by_class = counts_by_class(classifier, counted.counts)
+            failures = _failure_notes(project, classifier, counted.counts, project_dir)
             return counted.locked, status(
                 project, by_class, counted.hit_barrier, records, statuses, outcomes,
-                datetime.now(UTC), scheduler_name=scheduler.name, lock_holder=lock_holder)
+                datetime.now(UTC), scheduler_name=scheduler.name, lock_holder=lock_holder,
+                task_failures=failures)
 
         locked, result = report()
         if args.release_stale and result.stale:
@@ -534,7 +536,8 @@ def _poll(args, start):
         return 128 + signal.SIGTERM
     if killed:
         _message('warning', f'jobs killed by the scheduler: {_kills_by_class(killed)}')
-    return _report_end(result.report, _relative(project.logs, project_dir))
+    failures = _failure_notes(project, submitter.classifier, result.by_name, project_dir)
+    return _report_end(result.report, _relative(project.logs, project_dir), failures)
 
 
 class _Terminated(BaseException):
@@ -601,11 +604,12 @@ def _kills_by_class(kills):
                      for name, by_outcome in kill_counts(kills).items())
 
 
-def _report_end(report, logs='logs'):
+def _report_end(report, logs='logs', failures=()):
     '''Report a run that is over (finished, blocked or stalled); returns the exit
     status
 
-    ``logs`` is the worker logs directory, as shown to the user.
+    ``logs`` is the worker logs directory, as shown to the user; ``failures``
+    are the notes of :func:`_failure_notes`.
     '''
     from .submitter import Progress
     from .worker import SCHEDULER_LOGS
@@ -630,9 +634,38 @@ def _report_end(report, logs='logs'):
         waiting = ', '.join(f'{_table_label(n)} {c}' for n, c in report.waiting.items())
         message += f'; tasks waiting for them: {waiting}'
     _error(message)
-    _message('note', 'the worker logs say why the tasks failed; once fixed, '
-                     "'jug cleanup --failed-only' lets them run again")
+    for note in failures:
+        _message('note', note)
+    if not failures:
+        _message('note', 'the worker logs say why the tasks failed; once fixed, '
+                         "'jug cleanup --failed-only' lets them run again")
     return 1
+
+
+def _failure_notes(project, classifier, counts, project_dir):
+    '''Why the failed tasks failed, as the worker logs say (see :mod:`jug_hpc.failures`)
+
+    Parameters
+    ----------
+    project : ProjectSettings
+    classifier : Classifier
+    counts : dict
+        Task name -> TaskCounts
+    project_dir : Path
+
+    Returns
+    -------
+    notes : list of str
+        Empty if no task failed
+    '''
+    from .failures import failure_messages, find_failures
+    failed = {name: c.failed for name, c in counts.items() if c.failed}
+    if not failed:
+        return []
+    logs = project.logs if project.logs is not None else project_dir / 'logs'
+    found = find_failures(logs, failed)
+    return failure_messages(failed, found, classifier.class_of, project.get_class,
+                            _relative(logs, project_dir))
 
 
 def _stopped_messages(before, result):
@@ -734,7 +767,9 @@ def _submit_as_job(args, start):
                           counted.hit_barrier)
         if report.progress is not Progress.RUNNING:
             _message('note', 'no submitter job submitted')
-            return _report_end(report)
+            failures = _failure_notes(project, submitter.classifier, counted.counts,
+                                      project_dir)
+            return _report_end(report, _relative(project.logs, project_dir), failures)
 
         written = write_script(prepared, scheduler, project_state)
         record = submit_worker(written, scheduler, project_state)

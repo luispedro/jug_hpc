@@ -486,6 +486,26 @@ CPUs of the worker that ran them).
    - Not configurable yet (`MAX_FAILED_JOBS` is a constant); maybe a
      `--max-failed-jobs` option if users ask.
 
+9. Done (2026-11-07, asked for after a real run): say why tasks failed. The
+   end of a `BLOCKED` run (also `submit --as-job` refusing to submit) and
+   `jug-hpc status` (whenever tasks are failed) used to say only "the worker
+   logs say why". Now `failures.py` names, per task name with failed tasks,
+   the worker log that says why and the exception. Decisions:
+   - Jug's failed lock holds `PID ... on HOSTNAME ...`, no job ID, so the
+     log is found by its contents: Jug's `Exception while running <name>:
+     <msg>` line, then the last unindented line of the traceback that follows
+     (the exception raised last when chained; Jug's message without a
+     traceback). Every `<logs>/*.log` except the submitter's is read (not
+     filtered by class: `<class>-` prefixes are ambiguous with hyphenated
+     class names), only when tasks are failed. Per name: the newest log by
+     mtime, and how many logs record such failures (Jug logs no hash).
+   - Advice for common causes, kept small: `*MemoryError` → raise `memory`;
+     errno 28/122 → disk full/quota. Kills by the scheduler stay with
+     `kills.py` (they don't fail tasks, except `file_keepalive` locks after
+     30 min, which the "no log says why" note mentions).
+   - Parsing Jug's log text is fragile; a `jug execute --task-log` (Smart
+     limits, phase A) would tie failures to jobs exactly.
+
 **Done when:** a test jugfile with a task that exceeds its memory and one that
 exceeds its wall time produces a correct per-class report on PBS. → **Release
 0.3.** Done: checked on PBS Professional 2026.1 on 2026-11-06 (commit

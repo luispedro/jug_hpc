@@ -151,7 +151,8 @@ class StatusReport:
         with locked tasks but no workers
     notes : list of str
         Informational: the run is over, tasks are ready with nobody to run
-        them, jobs of another backend were not asked about, ...
+        them, why tasks failed (as the worker logs say), jobs of another
+        backend were not asked about, ...
     stale : tuple of str
         The classes warned about for locked tasks without workers (see
         :func:`jug_hpc.submitter.locked_without_workers`)
@@ -163,7 +164,7 @@ class StatusReport:
 
 
 def status(project, by_class, hit_barrier, records, statuses, outcomes, now, *,
-           scheduler_name, lock_holder=None, grace=SUBMIT_GRACE):
+           scheduler_name, lock_holder=None, grace=SUBMIT_GRACE, task_failures=()):
     '''Describe where a project is
 
     Parameters
@@ -190,6 +191,10 @@ def status(project, by_class, hit_barrier, records, statuses, outcomes, now, *,
         say), or None if nobody does
     grace : float, optional
         See :func:`worker_counts`
+    task_failures : sequence of str, optional
+        Why the failed tasks failed, as the worker logs say (see
+        :func:`jug_hpc.failures.failure_messages`); notes after the one on
+        the run being over
 
     Returns
     -------
@@ -243,6 +248,7 @@ def status(project, by_class, hit_barrier, records, statuses, outcomes, now, *,
           and any(c.ready for n, c in by_class.items() if n not in failing)):
         notes.append("tasks are ready, but no worker is queued or running and no submitter "
                      "is running: run 'jug-hpc submit'")
+    notes.extend(task_failures)
     if unknown:
         listed = ', '.join(_label(n) for n in unknown)
         notes.append(f'not in {project.path.name} any more, but with workers queued or '

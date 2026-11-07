@@ -34,7 +34,8 @@ workers left when no task can run (step 7), and `status` and the submitter's log
 warning about locks left by dead workers and `status --release-stale` removing them
 (step 5), and `check` noting jugdirs that can't detect dead workers (step 6,
 `check.dead_worker_note`), and `status` warning about a class whose last jobs all ended in
-error (`status.failing_jobs`) instead of only saying to run `jug-hpc submit`.
+error (`status.failing_jobs`) instead of only saying to run `jug-hpc submit`, and the worker
+log and exception of failed tasks (step 9, `failures.py`).
 
 ## Commands
 
@@ -168,6 +169,10 @@ paths replaced by `/home/me/rnaseq`.
   and `suggestion(outcome, rc)` (raise `memory`/`time`, lower `time_fraction`; SIGKILL
   gets the memory one as a guess). `cli._poll` warns for each killed job in
   `PollResult.ended` and sums them up per class when the run is over.
+- **`failures.py`**: why tasks failed: `find_failures` reads the worker logs for Jug's
+  `Exception while running <name>:` line and the traceback after it (newest log per name);
+  `failure_messages` (pure) gives the notes, used by `cli._failure_notes` at the end of a
+  `BLOCKED` run and by `status` (`task_failures`).
 - **`status.py`**: `jug-hpc status`, pure like `check.py`: `worker_counts` (queued/running
   per class, `SUBMIT_GRACE` as in `active_workers`) and `status(...)` → `StatusReport`
   (table text, kill warnings per class and kind (`current_kills` leaves out outdated

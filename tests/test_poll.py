@@ -1049,10 +1049,25 @@ def test_cli_submit_blocked(tmp_path, monkeypatch, capsys):
     assert lines[-1] == f'middle: cancelled job {middle[-1]} (running): no task can run'
     outcomes = sched.outcome(middle)
     assert outcomes[middle[-1]].outcome is Outcome.CANCELLED
+    # the worker (of two) that ran the failing task
+    first_log, = [p.stem.removeprefix('default-')
+                  for p in (project_dir / 'logs').glob('default-*.log')
+                  if 'ValueError' in p.read_text()]
     assert err == ('jug-hpc: error: no task can run: failed tasks: [default] 1; '
                    'tasks waiting for them: [class.middle] 1\n'
-                   "jug-hpc: note: the worker logs say why the tasks failed; once fixed, "
-                   "'jug cleanup --failed-only' lets them run again\n")
+                   f'jug-hpc: note: [default]: jugfile.first: 1 task failed; '
+                   f'logs/default-{first_log}.log says: ValueError: no\n'
+                   "jug-hpc: note: once fixed, 'jug cleanup --failed-only' lets the failed "
+                   'tasks run again\n')
+
+    # jug-hpc status says it too
+    assert main(['-C', str(project_dir), 'status']) == 0
+    _, err = capsys.readouterr()
+    assert err.splitlines()[-3:] == [
+        'jug-hpc: note: no task can run: failed tasks: [default] 1',
+        (f'jug-hpc: note: [default]: jugfile.first: 1 task failed; logs/default-{first_log}.log '
+        'says: ValueError: no'),
+        "jug-hpc: note: once fixed, 'jug cleanup --failed-only' lets the failed tasks run again"]
 
 
 @needs_bash

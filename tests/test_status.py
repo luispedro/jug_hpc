@@ -203,6 +203,10 @@ def test_status_notes(project):
     blocked = {'big': TaskCounts(failed=2, waiting=1), 'default': TaskCounts(finished=1)}
     report = status(project, blocked, False, [], {}, {}, NOW, scheduler_name='pbs')
     assert report.notes == ['no task can run: failed tasks: [class.big] 2']
+    # why they failed (jug_hpc.failures) comes after it
+    report = status(project, blocked, False, [], {}, {}, NOW, scheduler_name='pbs',
+                    task_failures=['why', 'what next'])
+    assert report.notes == ['no task can run: failed tasks: [class.big] 2', 'why', 'what next']
 
     barrier = {'big': TaskCounts(), 'default': TaskCounts(finished=1)}
     report = status(project, barrier, True, [], {}, {}, NOW, scheduler_name='pbs')

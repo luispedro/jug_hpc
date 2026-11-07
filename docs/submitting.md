@@ -57,9 +57,9 @@ It stops:
 - when every task is finished (exit status 0);
 - when no task is ready or running and some have failed, so that the tasks
   still waiting can never run (exit status 1). It lists the failed tasks per
-  class. The worker logs say why they failed. Once you have fixed the problem,
-  `jug cleanup --failed-only` lets the failed tasks run again, and you can
-  start `jug-hpc submit` again;
+  class, and why they failed (see [Failed tasks](#failed-tasks)). Once you
+  have fixed the problem, `jug cleanup --failed-only` lets the failed tasks
+  run again, and you can start `jug-hpc submit` again;
 - when the only tasks that could run belong to classes whose workers keep
   failing (exit status 1; see [Workers that keep
   failing](#workers-that-keep-failing)).
@@ -77,6 +77,34 @@ one would still start. If they can't be cancelled (the scheduler can't be
 reached), the submitter prints a warning and stops all the same: run
 `jug-hpc cancel` later, or let them exit by themselves. When every task is
 finished, the workers left exit at once, so they are not cancelled.
+
+### Failed tasks
+
+A task that raises an exception is *failed*: its worker writes the traceback
+to its log and exits, and Jug does not run the task again until `jug cleanup
+--failed-only` (workers run `jug execute --keep-failed`). For each task name
+with failed tasks, the submitter names the worker log that says why, with the
+exception (the last line of the traceback):
+
+```
+[2026-11-07 10:53:52] middle: cancelled job 2 (running): no task can run
+jug-hpc: error: no task can run: failed tasks: [default] 1; tasks waiting for them: [class.middle] 1
+jug-hpc: note: [default]: jugfile.first: 1 task failed; logs/default-1-1.log says: ValueError: no
+jug-hpc: note: once fixed, 'jug cleanup --failed-only' lets the failed tasks run again
+```
+
+The log is found by its contents (Jug's `Exception while running
+jugfile.first: ...` line), as Jug does not record which job ran a task: with
+several failed tasks of one name, the newest log (by modification time) that
+records such a failure is named, with how many logs do. For a `MemoryError`
+(raised where memory is limited by `ulimit`, not by cgroups), the note adds
+`it ran out of memory: raise memory (now 4G)`; for a full disk or a disk quota
+it says so. A failed task whose failure no log records is noted too: with the
+`file_keepalive:` jugdir, the lock of a task whose worker was killed counts as
+failed after 30 minutes (see [Workers killed by the
+scheduler](#workers-killed-by-the-scheduler) for why it was killed).
+
+`jug-hpc status` gives the same notes.
 
 ### Workers that keep failing
 
@@ -341,7 +369,8 @@ poll. Fix the cause first (here, raise `memory`), or the next worker will be
 killed too.
 
 Notes say when every task is finished, when no task can run because some
-failed, and when tasks are ready but no worker is queued or running and no
+failed, why tasks failed (as in [Failed tasks](#failed-tasks), also while the
+run goes on), and when tasks are ready but no worker is queued or running and no
 submitter is running (run `jug-hpc submit`; for the tasks of a class whose
 last jobs all ended in error, the warning above instead). The exit status is 0 unless the
 settings, the jugfile, `jobs.json` or the scheduler can't be read.
