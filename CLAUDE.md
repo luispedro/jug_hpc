@@ -69,7 +69,10 @@ changes (keys, defaults, CLI options, script contents, messages quoted there, li
 update the docs in the same commit, including `docs/llms.md` (the dense page for LLMs,
 also served as `/llms.txt` by a hook in `docs/conf.py`; plain Markdown, no MyST roles, so it
 reads well raw). Example output in the docs comes from real runs, with
-paths replaced by `/home/me/rnaseq`.
+paths replaced by `/home/me/rnaseq`. The key tables there are hand-written;
+`tests/test_docs.py` checks them against `CLUSTER_KEYS`/`PROJECT_KEYS`/`CLASS_KEYS`/
+`SUBMITTER_KEYS` (same keys, same order, the code's defaults) and `pbs.RAW_KEYS`, so
+adding a key means adding a row to both pages.
 
 ## Design principles that constrain code
 

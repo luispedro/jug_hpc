@@ -559,9 +559,16 @@ racing a job that just ended still cancels the rest of its batch.
    concepts, configuration reference, submitting (the polling submitter,
    `--all`/`--dry-run`/`--as-job`, the worker script), schedulers (PBS,
    local), FAQ (CPU propagation, choosing `time_fraction`, `file_keepalive`).
-   Left: generate the key tables of the configuration reference from
-   `CLASS_KEYS`/`PROJECT_KEYS`/... so they can't drift; `status`/`cancel`
-   when they exist; SLURM; how to write a backend (step 2); set up the Read
+   Done (2026-11-10): the key tables can't drift. Not generated, as planned
+   first: the tables of `configuration.md` and `llms.md` are worded
+   differently (and richer) than the one-line descriptions in the code, and
+   `llms.md` is plain Markdown, which no directive can fill. Instead
+   `tests/test_docs.py` checks that each table lists exactly the keys of
+   `CLUSTER_KEYS`/`PROJECT_KEYS`/`CLASS_KEYS`/`SUBMITTER_KEYS` in their order,
+   with the code's defaults, and that the PBS raw keys (`pbs.RAW_KEYS`) and
+   the backends in `schedulers.md` are the installed ones. A SLURM backend
+   adds its raw keys to that test. (`status`/`cancel` are documented in
+   `submitting.md`.) Left: SLURM; how to write a backend (step 2); set up the Read
    the Docs project. Keep the "Current limitations" section of
    `docs/submitting.md` in step with what is implemented.
 5. Check the success criteria from GOALS.md on a real PBS cluster and a real
