@@ -6,37 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `jug_hpc` runs [Jug](https://jug.readthedocs.io) jugfiles on HPC clusters, submitting
 workers sized per *resource class* of tasks (selected by Jug task name). Early development:
-read `GOALS.md` (design, principles) and `PLAN.md` (architecture, milestones, decisions)
+read `GOALS.md` (design, principles) and `PLAN.md` (decisions, milestones, what is deferred)
 before making design-level changes. PLAN.md is the source of truth for what comes next.
 
-Current state: milestones 0–1 are done; milestone 2 is done in code (`schedulers/`,
-`runner.py`, `worker.py`, `script.py`, `selection.py`, `state.py`, `submit.py`,
-`jug-hpc submit --all|--dry-run`; also checked on a real PBS cluster).
-Milestone 3 is done (also checked on a real PBS cluster): task counts per class
-(`jugstate.task_counts`, `classes.counts_by_class`, and `jugstate.subprocess_task_counts`
-for loading in a subprocess), `Scheduler.query()` for PBS and local (a `JobStatus` per job, with
-queued/running worker counts), the submission rule and exit condition (pure functions in
-`submitter.py`), and the polling loop (`poll.py`, plain `jug-hpc submit`, with a
-per-project lock), with end-to-end tests on the local backend (chain, three-class chain,
-barrier, workers stopped by `JUG_MAX_SECONDS`, failed task), and `submit --as-job` (the
-submitter as a job, sized by `[submitter]` in `jug_hpc.toml`), and backoff while nothing
-changes (`--max-interval`). Jug's status cache is deliberately not used (PLAN.md).
-Milestone 4 is done (checked on a real PBS cluster, 2026-11-06): `Scheduler.outcome()` for PBS and local (a `JobOutcome` per
-finished job; arrays combined by `schedulers.base.combine_outcomes`, worst worker wins),
-used by the submitter to stop submitting workers for a class whose jobs keep failing
-(step 8: `submitter.update_failing`/`stopped_classes`, `Progress.STALLED`), and
-to report jobs killed by the scheduler in the submitter's log, with what to change
-(step 4, `kills.py`), and `jug-hpc status` (step 1, `status.py`: tasks and workers per
-class, the submitter, and the kills of every recorded job), and `jug-hpc cancel`
-(step 2, `cancel.py`; PBS `cancel()` with `qdel`; the submitter logs a SIGTERM and exits
-143, `cli._sigterm_raises`), and the submitter cancelling the
-workers left when no task can run (step 7), and `status` and the submitter's log
-warning about locks left by dead workers and `status --release-stale` removing them
-(step 5), and `check` noting jugdirs that can't detect dead workers (step 6,
-`check.dead_worker_note`), and `status` warning about a class whose last jobs all ended in
-error (`status.failing_jobs`) instead of only saying to run `jug-hpc submit`, and the worker
-log and exception of failed tasks (step 9, `failures.py`), and `submit --cleanup-failed`
-(step 10, `jugstate.cleanup_failed`).
+Current state: milestones 0–4 are done (static and polling submission, `status`, `cancel`,
+failure handling; checked on a real PBS cluster). Next is milestone 5 (SLURM backend, backend
+guide, 1.0).
 
 ## Commands
 
@@ -113,7 +88,8 @@ adding a key means adding a row to both pages.
   confined here. Modules imported by the jugfile stay cached across in-process loads, so
   the submitter must load in a subprocess: `subprocess_task_counts` runs `python -P -m
   jug_hpc.jugstate counts` (through a `Runner`) and parses its JSON (versioned,
-  `_COUNTS_FORMAT`; it also lists the hashes of locked tasks per name).
+  `_COUNTS_FORMAT`; it also lists the hashes of locked tasks per name). Jug's status cache
+  is deliberately not used (PLAN.md says why).
 - **`selection.py`**: the `jug execute` args selecting a class's tasks. The default class
   uses `--exclude-name/--exclude-pattern` when the installed Jug supports them, otherwise a
   generated negative-lookahead `--pattern` regex that is verified against the classifier.

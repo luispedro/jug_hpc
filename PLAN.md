@@ -1,75 +1,32 @@
 # jug_hpc: implementation plan
 
-This plan turns [GOALS.md](GOALS.md) into ordered steps and milestones. Where
-GOALS.md lists an open question, the plan gives a recommended answer and says
-which step depends on it. Finished work is summarized only as far as later
-steps depend on it; the details are in the module docstrings and `git log`.
+This plan turns [GOALS.md](GOALS.md) into ordered steps and milestones. Finished
+work is summarized only as far as later steps depend on it; the details are in
+CLAUDE.md (where things live in the code), the module docstrings, the user
+documentation and `git log`.
 
 ## Decisions taken up front
 
-- **Language and versions.** jug_hpc is pure Python and requires
-  **Python 3.11 or later** (`requires-python = ">=3.11"`), currently
-  3.11–3.15. This is one version narrower than Jug (3.10+), so that TOML is
-  read with the standard library's `tomllib`. Otherwise jug_hpc follows Jug:
-  when Jug drops or adds a version, jug_hpc does the same. Jug is the only
-  runtime dependency.
+- **Python versions.** jug_hpc requires Python 3.11 or later, one version
+  narrower than Jug (3.10+), so that TOML is read with `tomllib`. Otherwise
+  jug_hpc follows Jug: when Jug drops or adds a version, jug_hpc does the same.
 - **Minimum Jug version.** `jug >= 2.7` (the first release with `--name` and
-  `--pattern`). Some steps need small additions to Jug (see "Changes needed in
-  Jug"), which will raise this minimum before jug_hpc 1.0.
-- **Scheduler order.** **PBS first** (OpenPBS / PBS Professional), then SLURM.
-  The SLURM backend is planned before 1.0 because a second real backend is the
-  only way to prove that the backend interface is easy to replace.
-- **Tooling.** Same as Jug: `uv` with `uv.lock`, `pytest`, a GitHub Actions
-  matrix over every supported Python version, and the MIT license.
-- **Submission strategy.** **A polling submitter** (strategy 2 in GOALS.md)
-  is the only strategy for 1.0.
+  `--pattern`). The changes listed under "Changes needed in Jug" will raise it
+  before jug_hpc 1.0.
+- **Scheduler order.** PBS first (OpenPBS / PBS Professional), then SLURM
+  before 1.0, because a second real backend is the only way to prove that the
+  backend interface is easy to replace.
+- **Submission strategy.** A polling submitter (strategy 2 in GOALS.md) is the
+  only strategy for 1.0.
   - It is the only strategy that handles every task graph, including classes
     that alternate and graphs that grow after a `barrier()`.
   - Scheduler dependencies (strategy 1) fail silently on exactly the graphs
     that need jug_hpc most, and the hybrid needs both implementations.
-  - The cost is a long-running process. This is kept small: one process per
-    project, sleeping most of the time, and runnable either on a login node or
-    as a small scheduler job (`jug-hpc submit --as-job`).
-  - Strategy 1 can still be added after 1.0 as an optimization, behind the
-    same interface.
+  - The cost is a long-running process, kept small: one per project, sleeping
+    most of the time, on a login node or as a small job (`submit --as-job`).
+  - Strategy 1 can still be added after 1.0 as an optimization.
 
-## Architecture
-
-```
-jug_hpc/
-  config/        load, merge and validate cluster.toml and jug_hpc.toml
-  units.py       memory and time parsing (canonical: bytes, seconds)
-  classes.py     resource classes, task -> class mapping (uses Jug's matchers)
-  jugstate.py    the only module that imports Jug internals: load the jugfile,
-                 count waiting/ready/running/failed/finished tasks per name
-  selection.py   the `jug execute` arguments that select a class's tasks
-  worker.py      WorkerSpec: everything one worker needs, scheduler-independent
-  script.py      the worker script body shared by every backend
-  schedulers/
-    base.py      Scheduler interface, JobStatus/JobOutcome types, registry
-    checks.py    scheduler settings checked against the installed backends
-    pbs.py       PBS backend (OpenPBS / PBS Pro)
-    local.py     runs workers as local subprocesses (tests, laptops)
-    slurm.py     (milestone 5)
-  runner.py      runs external commands; replaced by a fake in tests
-  state.py       per-project record of submitted jobs (.jug_hpc/ directory)
-  check.py       jug-hpc check
-  submit.py      static submission (submit --all / --dry-run)
-  submitter.py   the polling submitter's decisions (pure functions)
-  poll.py        the polling loop
-  cli.py         jug-hpc config | check | submit | status | cancel
-```
-
-Two rules keep the design testable and the schedulers replaceable:
-
-1. **Everything scheduler-specific lives in one backend module.** The rest of
-   jug_hpc only builds `WorkerSpec`s and calls the interface.
-2. **Backends separate pure functions from side effects.** Rendering a
-   script, building a command line and parsing scheduler output are pure
-   functions, tested against recorded output. Only `runner.py` executes
-   anything.
-
-### Scheduler interface
+## Scheduler interface
 
 As in `schedulers/base.py`; it may still change until milestone 5, when the
 SLURM backend is written.
@@ -94,483 +51,110 @@ class Scheduler(ABC):
     def cancel(self, jobs: list[JobId]) -> None
 ```
 
-`WorkerSpec` holds the class name, the portable resources in canonical units
-(cpus, memory in bytes, wall time in seconds), the number of array elements,
-the partition, the merged raw options for this backend, the setup snippets,
-the log path template, and the command line. Backends are found through the
-`jug_hpc.schedulers` entry point group, so a new scheduler can be added in a
-separate package without changing jug_hpc.
-
-The worker script body is the same for every scheduler and is produced by a
-shared template (`script.py`, whose docstring explains the choices); a backend
-adds only its directive header and the shell expressions for its job ID and
-array index. The user documentation shows a rendered script and explains it
-line by line (`docs/submitting.md`, "The worker script": log redirection,
-`logs/scheduler/`, short wait cycles, `--keep-failed`, the order of the CPU
-variables, setup and `JUG_MAX_SECONDS`).
-
-### PBS specifics
-
-The job header, arrays, memory units and the three raw-option keys
-(`select`, `resources`, `directives`) are documented for users in
-`docs/schedulers.md`, and in full in `pbs.py`'s docstring. For development:
-
-- Workers = 1 is a plain job, as some PBS installations reject single-element
-  arrays (plain jobs and arrays both checked on PBS Professional 2026.1).
-- Queue state: `qstat -f -F json -x JOB...`. Torque's `qstat` is different;
-  Torque support is out of scope for 1.0 but must be possible as a separate
-  backend.
-- Job outcome: PBS `Exit_status`, where negative values are PBS's own codes
-  (including walltime and memory kills, `pbs.PBS_EXIT_CODES`) and values of
-  256 or more, or 128 + N, mean "killed by signal N". `substate` 91 means
-  deleted with `qdel` (`Outcome.CANCELLED`, as for a cancelled local job). A failed job that used at least its requested walltime
-  counts as a wall-time kill. Checked on PBS Professional 2026.1 with cgroups
-  (2026-11-05, recordings in `tests/pbs_output/pbspro-2026.1/`): wall time
-  kills are `-29`; `qdel` gives `143` with substate 91; a job over its memory
-  is killed by the cgroup OOM killer and shows only as `137`, which is
-  reported as SIGKILL "probably for using more memory than requested"
-  (KILLED_SIGNAL, not KILLED_MEMORY: nothing in `qstat` confirms it; only
-  the job's PBS output file says `cgroup/OOM: Killed because of memory
-  limit`). `Exit_status` can be a string (`"-29"`). The modelled files
-  (`qstat-f-json*.json`) stay for cases not seen there (-27, 256 + N,
-  unescaped control characters).
-
-The rest (what raw tables may set, the job-ID expression, `-o`/`-e` paths,
-`qstat` error handling) is in `pbs.py`'s docstring.
+PBS details (exit codes, substates, the memory and wall-time heuristics, what
+was seen on PBS Professional 2026.1) are in `pbs.py`'s docstring. Torque's
+`qstat` differs; Torque is out of scope for 1.0 but must be possible as a
+separate backend.
 
 ## Changes needed in Jug
 
-jug_hpc must not reimplement Jug (principle 2), but two things it needs are
-not yet available:
+jug_hpc must not reimplement Jug (principle 2), but needs:
 
-1. **Running the default class.** Its workers must run every task *not*
-   matched by any class, and `jug execute` can only include tasks, not
-   exclude them. Proposal: `jug execute --exclude-name X` (repeatable) and
-   `--exclude-pattern`, with the same matching rules as `--name`/`--pattern`.
-   Fallback for older Jug: a generated `--pattern '/^(?!...)/'` regex that
-   reproduces the `--name` rules. The fallback is fragile, so the Jug option
-   is preferred.
-2. **Task counts per state.** The submitter needs, for each task name, the
-   number of tasks that are ready, running, waiting, failed and finished: the
-   numbers `jug status` already computes (`update_status` in
-   `jug/subcommands/status.py`). Proposal: a small public Python API (e.g.
-   `jug.status.task_counts(jugfile, jugdir)`), plus `jug status --json`. The
-   API should support Jug's status cache, because the submitter calls it
-   repeatedly.
+1. **Running the default class**: `jug execute --exclude-name X` (repeatable)
+   and `--exclude-pattern`. Without them, `selection.py` falls back to a
+   generated negative-lookahead `--pattern`, which is fragile.
+2. **Task counts per state**: a public API for what `jug status` computes
+   (`update_status`), and `jug status --json`. Until then `jugstate.py` calls
+   Jug's internal functions.
 
-Both are small and independent of jug_hpc, and they go into the next Jug
-release. Until then, `jugstate.py` calls the internal functions directly and
-pins the Jug version it was tested with.
+Both are on `../jug`'s main branch but not released (PyPI has 2.7.0):
+`--exclude-*` (f7df6cb) and `jug status --json` (2b295c0). Also unreleased
+there (74d9756): Jug 2.7.0's `hash_update` runs `import numpy` on every call,
+which without numpy installed made loading a 100k-task jugfile take 11–14 s
+instead of about 1.3 s (`jug execute`/`jug status` too). Minor: formatting a
+jugfile traceback raises a linecache `DeprecationWarning` (Jug's jugfile module
+has no `__spec__`); `jugstate.py` suppresses it.
 
-Status: both are on the sibling `../jug` checkout's main branch but not yet released
-(PyPI has 2.7.0): `--exclude-name`/`--exclude-pattern` (f7df6cb; `selection.py`
-detects them and falls back to the regex otherwise) and `jug status --json`
-(2b295c0). Minor, also for Jug: formatting a jugfile traceback raises a
-linecache `DeprecationWarning` (Jug's jugfile module has no `__spec__`);
-`jugstate.py` suppresses it.
+Candidate Jug changes for after 1.0 (see "Smart limits"): `jug execute
+--task-log FILE` (per-task time and memory) and selecting tasks by hash.
 
-Performance, fixed in `../jug` (74d9756, unreleased): with Jug 2.7.0,
-`jug.hash.hash_update` runs `import numpy` on every call, and a failed import
-is not cached, so without numpy installed each call searches all of
-`sys.path`. Loading a 100k-task jugfile without numpy took 11–14 s instead of
-about 1.3 s, and `jug execute`/`jug status` pay the same cost. The fix uses
-`sys.modules.get('numpy')`; task hashes do not change.
+## Milestones
 
-## Milestones and steps
+Milestones 0–4 are done, each checked on a real PBS cluster (PBS Professional
+2026.1, with `tests/manual/pbs/run-everything.sh`, rerun by hand for each
+release): 0, skeleton and CI; 1, configuration and `check`; 2, the PBS backend
+and static submission (release 0.1); 3, the polling submitter (release 0.2);
+4, `status`, `cancel` and failure handling (release 0.3).
 
-### Milestone 0: project skeleton — done, except CI
+### Decisions that constrain later work
 
-Package, `uv.lock`, license, CI workflow, `jug-hpc --version`/`--help`.
-
-**Done when:** CI is green on every supported version. Not yet checked:
-nothing has been pushed to `origin`, so CI has never run.
-
-### Milestone 1: configuration and task classification (`config`, `check`) — done
-
-### Milestone 2: PBS backend and static submission (`submit --dry-run`, `submit --all`)
-
-Done in code: the scheduler interface and registry, runner, worker script,
-PBS and local backends, `.jug_hpc/` state, `submit --dry-run|--all`, and a
-fake `qsub`. Checked on a real PBS cluster (PBS Professional 2026.1,
-2026-11-05, with `tests/manual/pbs/`): a directory is accepted for `-o`/`-e`,
-plain jobs and arrays run, `qsub` prints `27666324.aqua` / `27666325[].aqua`,
-and `--dry-run` output submitted by hand runs to completion. Done.
-
-**Done when:** `--dry-run` output can be submitted by hand on a real PBS
-cluster and runs a one-class jugfile to completion. → **Release 0.1.**
-
-### Milestone 3: the polling submitter
-
-Steps 1–7 are done (task counts per class, `query()`, the submission rule,
-the exit condition, `jug-hpc submit` and `--as-job`, backoff, end-to-end tests
-on the local backend).
-Decisions taken there that later steps depend on:
-
-- **The submitter loads the jugfile in a subprocess** on each poll
-  (`jugstate.subprocess_task_counts`). Loading in-process keeps the modules
-  the jugfile imports in `sys.modules`, so changes to them are not seen, and
-  tasks they create at import time are not created again on the next load,
-  which breaks the dependency graph
+- **The submitter loads the jugfile in a subprocess** on each poll. In-process,
+  the modules the jugfile imports stay in `sys.modules`, so changes to them are
+  not seen, and tasks they create at import time are not created again, which
+  breaks the dependency graph
   (`tests/test_jugstate.py::test_tasks_from_imported_module`). A subprocess
-  also keeps the jugfile's memory and crashes out of the long-running
-  submitter.
-- `query()` returns a `JobStatus` per job: its state plus the number of its
-  workers queued and running, because an array whose elements end at
-  different times must count only its remaining workers.
-- A job reported unknown within `SUBMIT_GRACE` (300 s) of its submission
-  counts all its workers as queued, since a scheduler may not list a job it
-  has just accepted.
-- Workers still queued or running don't delay the exit. A dead worker's lock
-  keeps its task "running" forever, so the submitter never exits (it warns;
-  milestone 4 step 5).
-- The `--as-job` submitter job's resources are a `[submitter]` table in
-  `jug_hpc.toml`; nothing is inherited from `[default]`, and `submitter` is a
-  reserved class name.
-- Poll cost, measured on 2026-11-05 with a 100,001-task jugfile (two
-  50k-task `TaskGenerator`s and a reduction): about 2 s and 150 MB per poll,
-  whether no task or every task is finished. About 85% of that is hashing the
-  tasks to build the dependency graph; checking the store is about 5%.
-- **Jug's status cache is not used.** It is fast only because it does not
-  load the jugfile again, so it would miss tasks created after a `barrier()`
-  and edits to the jugfile; the hashing, which is the cost, needs the
-  jugfile loaded. If polls get too slow, cache hashes keyed by something
-  cheaper (not planned).
-- **Backoff** (`poll.run`): after a poll with the same counts, the same
-  active workers and no submission, the wait doubles, up to `--max-interval`
-  (default 5 × `--interval`); any change or failed poll resets it. The
-  maximum bounds how late newly ready tasks are noticed.
+  also keeps the jugfile's memory and crashes out of the submitter.
+- **Jug's status cache is not used.** It is fast only because it doesn't load
+  the jugfile again, so it would miss tasks created after a `barrier()` and
+  edits to the jugfile. The cost of a poll is hashing the tasks (about 85% of
+  2 s and 150 MB per poll for 100k tasks), which needs the jugfile loaded. If
+  polls get too slow, cache hashes keyed by something cheaper (not planned).
+- **Locks are not tied to jobs**: Jug's lock files hold `PID ... on HOSTNAME`,
+  no job ID. Stale locks are therefore found per class (locked tasks, no queued
+  or running worker), and the submitter only warns: it can't tell a dead
+  worker's lock from a `jug execute` run by hand. `status --release-stale`
+  releases them on request. Likewise, failed tasks are tied to worker logs by
+  parsing Jug's log text (`failures.py`), which is fragile. Per-task logs
+  (Smart limits, phase A) would fix both.
 
-Remaining:
+### Deferred, or open
 
-6. Open questions:
-   - A submitter job that reaches its wall time is killed (workers keep
-     running; the user submits again). It could resubmit itself before then;
-     it would have to release the lock first, and the new job wait briefly
-     for it.
-   - Should `submit --all` refuse to run while the submitter lock is held?
-     (It does not take the lock now.)
-   - Show the jugfile's own output (`PollResult.output`) on the first poll?
-7. Checked on a real PBS cluster (PBS Professional 2026.1, 2026-11-05, with
-   `tests/manual/pbs/run-everything.sh`; all passed, outcome parsing fixed as
-   described under "PBS specifics"; unknown jobs: exit status 153 and
-   `qstat: Unknown Job Id <id>`, known jobs still listed). The checklist:
-   - record real `qstat -f -F json -x` output (plain job and array; queued,
-     running and finished; an unknown ID) into `tests/pbs_output/`, replacing
-     `qstat-f-json.json`, which is modelled on OpenPBS 23, not recorded. Check
-     that the JSON is valid (older PBS versions had escaping bugs; parsing
-     already uses `strict=False`), the attribute names, and qstat's exit
-     status and messages for unknown jobs;
-   - the same with `-t` for job outcomes (replacing the modelled
-     `qstat-f-json-xt.json`): that finished array elements are listed with
-     `Exit_status`, and the actual `Exit_status` of a job killed for memory
-     (cgroups or MoM enforcement), for wall time, by `qdel`, and of an array
-     with a deleted element;
-   - a `setup` that fails (`exit 3; ...`): plain `jug-hpc submit` stops after
-     3 jobs of the class with `Progress.STALLED` (needs job history; check
-     that the site keeps it long enough for a poll to see the job end);
-   - plain `jug-hpc submit` and `--as-job`: that compute nodes may run
-     `qsub`/`qstat`, and that the job finds the same `cluster.toml` (a
-     non-default `XDG_CONFIG_HOME` is not passed to PBS jobs).
+Add when users ask:
 
-**Done when:** the three-class jugfile from the success criteria runs to
-completion on the local backend and on a real PBS cluster from a single
-`jug-hpc submit`, and no worker waits more than a few minutes for
-dependencies. → **Release 0.2.**
-Real PBS: done (2026-11-05; each worker started its first task within 4 s of
-starting, with plain `submit` and with `--as-job`).
-Local backend: done (`tests/test_poll.py::test_cli_submit_runs_three_classes`,
-a default → align → merge → default chain whose tasks record the class and
-CPUs of the worker that ran them).
+- `cancel --force` for a submitter running outside the scheduler;
+  `--keep-workers` (don't cancel workers when a run ends `BLOCKED`/`STALLED`);
+  `--max-failed-jobs`; per-class selection for `--cleanup-failed`.
 
-### Milestone 4: status, cancel and failure handling — done
+Open:
 
-1. Done: `jug-hpc status`: Jug's task counts grouped by class, plus
-   queued/running workers per class (`status.py`, pure; `cli.cmd_status`).
-   Decisions:
-   - Tasks are counted in a subprocess, as by the submitter (its output is
-     dropped). Every job of the backend in use in `jobs.json` is queried
-     (no state kept between runs), then `outcome()` for the finished ones.
-   - Workers counted as by `active_workers` (an unknown job within
-     `SUBMIT_GRACE` counts as queued). A class no longer in `jug_hpc.toml`
-     gets a row only while it has active workers (and a note).
-   - The submitter: who holds `submitter.lock`
-     (`ProjectState.submitter_lock_holder`, a non-blocking shared `flock`,
-     creating nothing), and the queued/running `--as-job` jobs.
-   - Notes: every task finished; blocked by failed tasks; tasks ready but no
-     active worker and no submitter ("run 'jug-hpc submit'"); jobs of
-     another backend not queried. Exit status 0 unless something can't be
-     read.
-2. Done: `jug-hpc cancel`: cancel every job recorded for the project that is
-   queued or running, including the submitter job (`cancel.py`;
-   `cli.cmd_cancel`; PBS `cancel()` with `qdel`; fake `qdel` in
-   `tests/fake_pbs/`). Decisions:
-   - Active as for the submitter (`submitter.active_jobs`): an unknown job
-     within `SUBMIT_GRACE` is cancelled too (cancelling it twice is harmless).
-   - The submitter job first, then wait (up to `CANCEL_WAIT`, 120 s) until the
-     scheduler no longer lists it as queued/running *and* `submitter.lock` is
-     free; then reread `jobs.json` and cancel the workers (so workers it
-     submitted meanwhile are cancelled too). If it has not stopped, the
-     workers are cancelled anyway, with an error (exit status 1).
-   - A submitter outside the scheduler (lock held, no active submitter job)
-     is refused: nothing cancelled, "stop it first (Ctrl-C)". No `--force`
-     yet; add one if users ask.
-   - Reads only `cluster.toml` and `jobs.json` (not `jug_hpc.toml`, not the
-     jugfile), so it works while they have errors. Other backends' jobs: a
-     note. No per-class selection, no confirmation prompt (as `qdel`).
-   - PBS: `qdel` without `-x` (keeps history for `outcome()`), batched as
-     `qstat`; its messages for finished/unknown jobs (`Job has finished`,
-     `Unknown Job Id`) are ignored. These messages are from OpenPBS's
-     sources: step 6 of the manual kit (`tests/manual/pbs/6-cancel`) records
-     them, and the whole cancel, on a real cluster. A job deleted before it
-     started (substate 91, no `Exit_status`) is now `CANCELLED`, not
-     `UNKNOWN`.
-   - The submitter job's log used to just stop when it was cancelled (Python
-     died on SIGTERM). Now `cli._poll` turns SIGTERM into an exception
-     (`_Terminated`, a `BaseException` like `KeyboardInterrupt`): the lock is
-     released and `stopped by SIGTERM; ...` logged (with the time, as the
-     job's log is where it is read), exit status 143. Also at the end of the
-     job's wall time. A second SIGTERM kills it as before. Not handled: a
-     SIGTERM between `submit` and `add_job` loses the job's record (as
-     before, and as with Ctrl-C).
-3. Done: `outcome()` in the PBS backend (`qstat -f -F json -x -t`, so array
-   elements are listed with their own `Exit_status`; codes and the wall-time
-   heuristic in `pbs.py`'s docstring). Arrays get their worst worker's
-   outcome in both backends (`base.combine_outcomes`, which groups workers
-   with the same detail). Jobs not finished or unknown are left out of the
-   result. Used by step 8; step 4 will use it too.
-4. Report jobs killed by the scheduler, broken down by class, in `status` and
-   in the submitter's log, with a suggestion (raise `memory`, raise `time`, or
-   lower `time_fraction`). Done for the submitter's log: `kills.py` (pure:
-   `scheduler_kills`, `kill_counts`, `suggestion`), `PollResult.ended` (the
-   watched jobs each poll saw end, with outcomes), a warning per killed job
-   in `cli._poll` and a per-class summary when the run is over. Decisions:
-   - Killed = KILLED_MEMORY, KILLED_TIME or KILLED_SIGNAL. A new
-     `Outcome.CANCELLED` (qdel, local cancel; severity between FAILED and
-     UNKNOWN) keeps jobs deleted by the user out of the report.
-   - SIGKILL gets the memory suggestion as a guess ("if it used more memory
-     than requested"), as cgroup OOM kills show only as SIGKILL on PBS.
-   - Arrays are reported once, by their worst worker (as
-     `combine_outcomes`); the detail lists the others. Per-worker counts
-     would need `outcome()` to return the workers' outcomes too.
-   - Suggestions use the class as configured now; a class no longer in
-     `jug_hpc.toml` gets none (in the submitter's log; `status` leaves
-     such kills out, see below).
-   - Done in `status` (step 1): the same report from `jobs.json` and
-     `outcome()`, including jobs that ended before the submitter started:
-     one warning per class and kind of kill, with the count, the last such
-     job and its suggestion.
-   - Decided after the real-cluster run of 2026-11-06 (it kept suggesting
-     "raise memory (now 6G)" after memory had been raised and every task had
-     finished): `status` leaves out outdated kills (`status.current_kills`):
-     those followed by a job of the class that succeeded (in `jobs.json`
-     order), those of jobs whose resources (`state.JobResources`: cpus,
-     memory, time, `JUG_MAX_SECONDS`, now recorded in `jobs.json` at
-     submission; older records are compared on success only) differ from the
-     class's now, and those of classes no longer in `jug_hpc.toml`. The
-     submitter's log is unchanged (its settings don't change during a run).
-     `failing_jobs` likewise: a job recorded with other resources than the
-     class has now ends the run of failures (as a cancelled one), so after
-     a fix `status` gives the note that says to run `jug-hpc submit`.
-     Changes to `setup` are not detected (only resources are recorded).
-   - The memory guess for a SIGKILL showed "(last measured use: 0kb of
-     1gb)" on the real cluster (PBS samples memory use, and missed it): the
-     measurement is shown only when it is at least half the limit.
-   - Found on a real run (2026-11-07): the cgroup OOM killer killed a
-     process a task ran (not Jug), so the task failed, Jug exited 1 and PBS
-     recorded `Exit_status 1` (`mem=133722672kb` of `128gb`; the job's `.ER`
-     file: `cgroup/OOM: Killed because of memory limit`). Nothing was
-     reported. Now a PBS job that failed with status 1-128 and used at least
-     `pbs.MEMORY_AT_LIMIT` (90%) of its `mem` is `KILLED_MEMORY` ("a process
-     it ran was probably killed ..."), and `failures.advice` suggests raising
-     `memory` for an exception showing a SIGKILLed child (`<Signals.SIGKILL:
-     9>`, `exit status 137`, `BrokenProcessPool`). Not done: reading the
-     scheduler's `.ER` file (its message is from the site's cgroup hook, and
-     the file name is backend- and site-specific). To do: a step in
-     `tests/manual/pbs/` with a task whose subprocess goes over its memory, to
-     record this `qstat` output at the next release check.
-   - Noticed while documenting it: a job that ran tasks and was then killed
-     for wall time counts towards `MAX_FAILED_JOBS` when no task of the class
-     ended between the poll before and the one that sees it end (step 8
-     rule). Fine for a task that never fits, but maybe count only jobs that
-     ran no task (would need per-job task counts; not done). Decided
-     (2026-11-05): keep the rule as it is for now.
-5. Done: stale locks (`check` notes the jugdirs concerned: step 6). Reported by `status` and
-   in the submitter's log (`submitter.locked_without_workers`), removed by
-   `jug-hpc status --release-stale`. Decisions:
-   - Jug lock files hold `PID ... on HOSTNAME ...` but no job ID, so locks
-     are not tied to jobs. Instead: a class whose tasks are locked (Jug's
-     `running` count) while no worker of the class is queued or running
-     (as `worker_counts`, so an unknown job within `SUBMIT_GRACE` counts
-     as queued) gets a warning. Workers run only their class's tasks, so
-     nothing of jug_hpc can hold those locks. A queued worker suppresses it
-     (it may have started between the query and the count; the scheduler is
-     asked first); so does any active worker of a class no longer in
-     `jug_hpc.toml` (its tasks are counted in other classes).
-   - A `jug execute` run by hand (or with another backend's jobs) is
-     reported too; the warning says so ("unless a 'jug execute' started
-     outside jug-hpc is running it").
-   - The submitter keeps polling (`RUNNING`) while tasks are locked, and
-     warns (`PollResult.stale_locks`) about a class with locked tasks and no
-     active worker (as for the submission rule, so a recent unknown job
-     counts) at two successful polls in a row (a worker that just ended, or a
-     short `jug execute` by hand, is not reported), once while that lasts;
-     again if it comes back (e.g. a new worker killed after
-     `--release-stale`). The message says what `--release-stale` then does
-     (the next poll submits workers). It does not end the run or cancel
-     anything: the locks may be a `jug execute` outside jug-hpc.
-   - With `file_keepalive`, Jug counts a dead worker's lock as *failed*
-     after 30 minutes (`is_failed`: mtime older than 30 min), so the run
-     ends `BLOCKED` (and `jug cleanup --failed-only` frees it); before
-     that, `status` reports it as here.
-   - `--release-stale`: Jug has no CLI to remove one task's lock (`jug
-     cleanup --locks-only` removes all, failed ones included). The counts
-     subprocess now also lists the hashes of the `running` tasks per name
-     (`SubprocessCounts.locked`, JSON format 2). Then the CLI rereads
-     `jobs.json`, queries the scheduler again (`classes_to_release`), and
-     releases in-process (`jugstate.release_locks`: the store from
-     `jug.backends.select`, no jugfile loading, so the window after the
-     query is milliseconds) the locks still locked and not failed, in the
-     classes still without queued/running workers. A worker that held a
-     lock at count time was recorded before it, so the second query sees
-     it. Then a second count gives the table. Released locks go to stdout
-     (`[class.x]: released the locks of N tasks`), a class that got a
-     worker meanwhile is a note. No confirmation prompt; a `jug execute`
-     outside jug-hpc loses its locks too (documented).
-6. Done: `check` notes a jugdir that can't detect dead workers
-   (`check.dead_worker_note`). Decisions:
-   - A note, not a warning: it shows for most projects (Jug's default
-     jugdir), and nothing breaks (step 5: the submitter and `status` warn,
-     `--release-stale` removes the locks).
-   - Shown for Jug's default jugdir, a plain directory and `redis:`; not for
-     `file_keepalive:` nor `dict_store` (already a warning). It suggests
-     `file_keepalive:` with the same path (same storage format, so an
-     existing jugdir can be switched); for `redis:` a `<directory>`, and the
-     URL is not echoed (it may hold a password).
-   - Only in `check`, not in `submit` (which would repeat it at every run).
-7. Done: when the submitter stops because of failed tasks, cancel the workers
-   left waiting for tasks that depend on them: each waits `NR_WAIT_CYCLES ×
-   WAIT_CYCLE_TIME` (3 min) before exiting, holding its allocation (and a
-   queued one would still start). Decisions:
-   - The last poll (`BLOCKED` or `STALLED`) cancels *every* worker job that
-     is active as for the submitter (`submitter.active_jobs`, so recent
-     unknown jobs too; not the submitter job), also those of earlier runs or
-     of `--all`. No choice of "which workers wait for blocked tasks" is
-     needed: in both cases no task is running and none is ready except those
-     of stalled classes, which by definition have no active workers.
-   - `FINISHED` leaves workers alone (they exit at once).
-   - The cancelled jobs are in `PollResult.cancelled` (with their status) and
-     logged as `<class>: cancelled job N (<status>): no task can run`. A
-     failed cancel is `PollResult.cancel_error`, a warning; it does not fail
-     the poll (the run is over all the same), so it is not retried.
-   - No option to keep them; add `--keep-workers` if users ask.
-   - `jug-hpc status` after a `STALLED` run used to note only "tasks are
-     ready, but no worker ... run 'jug-hpc submit'". Now (`status.failing_jobs`),
-     when no submitter runs, a class with ready tasks and no workers whose
-     last `MAX_FAILED_JOBS` or more jobs (in `jobs.json` order) all ended in
-     error gets a warning instead ("its last N jobs ended in error (the last:
-     ...), which stops a submitter from submitting workers for it; the worker
-     logs ... once fixed, run 'jug-hpc submit'"). Decisions: `status` has no
-     task counts between the jobs, so it does not check (as
-     `update_failing` does) that no task ended meanwhile, and says only that
-     the jobs failed; a job cancelled by a user (`Outcome.CANCELLED`) or
-     without a known outcome ends the run of failures (after `jug-hpc
-     cancel` the class is not failing); not shown while a submitter runs
-     (its log says it, and `submit` would refuse to start); the generic note
-     stays for ready tasks of other classes.
-8. Done: workers that die before Jug starts (e.g. a `setup` command that
-   fails) left the tasks ready, so the submitter submitted a new job at
-   every poll, forever. Now the submitter fetches the outcome of each job it
-   saw queued or running once it ends, and keeps per class the jobs that
-   ended in error since a task of the class last ended (finished or failed;
-   a job that succeeds also clears the list). After `MAX_FAILED_JOBS` (3)
-   such jobs the class is *stopped*: no new workers until a task of the
-   class ends. When only stopped classes (without queued or running
-   workers) have ready tasks and nothing runs, the run ends with
-   `Progress.STALLED` (exit status 1, pointing at the logs). Decisions:
-   - Jobs already ended when the submitter first queries them are not
-     counted (they may predate a fix), so a restart gives every class a
-     fresh start.
-   - The poll now queries the scheduler *before* counting tasks, so the
-     tasks a job ran before it ended are in the counts of the poll that sees
-     it end; failures seen at a poll where a task of the class ended are not
-     counted (lenient: a false stop is worse than a few extra jobs).
-   - Without PBS job history, finished jobs are UNKNOWN and have no
-     outcome, so the rule never triggers (documented).
-   - Not configurable yet (`MAX_FAILED_JOBS` is a constant); maybe a
-     `--max-failed-jobs` option if users ask.
-
-9. Done (2026-11-07, asked for after a real run): say why tasks failed. The
-   end of a `BLOCKED` run (also `submit --as-job` refusing to submit) and
-   `jug-hpc status` (whenever tasks are failed) used to say only "the worker
-   logs say why". Now `failures.py` names, per task name with failed tasks,
-   the worker log that says why and the exception. Decisions:
-   - Jug's failed lock holds `PID ... on HOSTNAME ...`, no job ID, so the
-     log is found by its contents: Jug's `Exception while running <name>:
-     <msg>` line, then the last unindented line of the traceback that follows
-     (the exception raised last when chained; Jug's message without a
-     traceback). Every `<logs>/*.log` except the submitter's is read (not
-     filtered by class: `<class>-` prefixes are ambiguous with hyphenated
-     class names), only when tasks are failed. Per name: the newest log by
-     mtime, and how many logs record such failures (Jug logs no hash).
-   - Advice for common causes, kept small: `*MemoryError` → raise `memory`;
-     errno 28/122 → disk full/quota. Kills by the scheduler stay with
-     `kills.py` (they don't fail tasks, except `file_keepalive` locks after
-     30 min, which the "no log says why" note mentions).
-   - Parsing Jug's log text is fragile; a `jug execute --task-log` (Smart
-     limits, phase A) would tie failures to jobs exactly.
-10. Done (2026-11-07, asked for with step 9): `jug-hpc submit --cleanup-failed`
-    removes the failed marks before running, instead of asking the user to run
-    `jug cleanup --failed-only`. Decisions:
-    - In-process (`jugstate.cleanup_failed`, Jug's own loop over
-      `store.listlocks()`/`is_failed()`/`release()`, as `release_locks`):
-      no jugfile load, and no `jug` executable needed on the login node.
-    - Under the submitter lock (so never while another submitter runs).
-      `--as-job`: before the job is submitted (inside the lock check), not in
-      the job, so the blocked-run check sees the cleaned state. `--all`:
-      before counting. `--dry-run`: a usage error (it changes nothing).
-    - All failed tasks, no per-class/name selection (as Jug's command); add
-      one if users ask. Store errors are not caught (as `--release-stale`).
-    - The failure notes now suggest it (`jug cleanup --failed-only` kept as
-      the alternative).
-
-**Done when:** a test jugfile with a task that exceeds its memory and one that
-exceeds its wall time produces a correct per-class report on PBS. → **Release
-0.3.** Done: checked on PBS Professional 2026.1 on 2026-11-06 (commit
-4e8bd35), with steps 1–8 of `tests/manual/pbs/run-everything.sh` all passing:
-step 7 (memory and wall-time kills, the stale lock, `--release-stale`, the
-fix), step 8 (step 7 above), and step 6 (`jug-hpc cancel` of a running
-submitter job and running workers; the `qdel` message for a finished job,
-recorded, is the one ignored). Recordings in `tests/pbs_output/pbspro-2026.1/`.
-Checked by hand afterwards: `qdel <finished> <queued>` prints `Job has
-finished`, exits 35 and still deletes the queued job, so a `jug-hpc cancel`
-racing a job that just ended still cancels the rest of its batch.
+- A submitter job that reaches its wall time is killed (workers keep running;
+  the user submits again). It could resubmit itself first, releasing the lock
+  and letting the new job wait briefly for it.
+- Should `submit --all` refuse to run while the submitter lock is held? (It
+  does not take the lock now.)
+- Show the jugfile's own output (`PollResult.output`) on the first poll?
+- A job that ran tasks and was then killed for wall time counts towards
+  `MAX_FAILED_JOBS` if no task of the class ended between the poll before and
+  the one that sees it end. Counting only jobs that ran no task needs per-job
+  task counts. Kept as is for now (decided 2026-11-05).
+- Kills of an array are reported once, by its worst worker; per-worker counts
+  need `outcome()` to return each worker's outcome.
+- Outdated kills and failures are detected only by recorded resources
+  (`state.JobResources`), not by changes to `setup`.
+- A SIGTERM or Ctrl-C between `submit` and `add_job` loses the job's record.
+- Not done: reading the scheduler's error file (e.g. PBS `.ER`, where the
+  cgroup hook writes `Killed because of memory limit`); it is backend- and
+  site-specific.
+- To do: a step in `tests/manual/pbs/` with a task whose subprocess goes over
+  its memory, to record that `qstat` output at the next release check.
 
 ### Milestone 5: second scheduler and 1.0
 
 1. `schedulers/slurm.py`: `sbatch`, `squeue`, `sacct`, `scancel`, raw
    `[slurm]` options as in GOALS.md. Any change it needs in `base.py` is made
-   now, before the interface is frozen.
+   now, before the interface is frozen. Its raw keys go into
+   `tests/test_docs.py`.
 2. Document how to write a backend (the interface, the shared template, the
    entry point), using PBS and SLURM as examples.
 3. Jug changes released, minimum Jug version raised, internal-function
    fallbacks removed.
-4. User documentation, in `docs/` (Sphinx + MyST Markdown, set up like Jug's,
-   built on Read the Docs by `.readthedocs.yaml`). Started: tutorial,
-   concepts, configuration reference, submitting (the polling submitter,
-   `--all`/`--dry-run`/`--as-job`, the worker script), schedulers (PBS,
-   local), FAQ (CPU propagation, choosing `time_fraction`, `file_keepalive`).
-   Done (2026-11-10): the key tables can't drift. Not generated, as planned
-   first: the tables of `configuration.md` and `llms.md` are worded
-   differently (and richer) than the one-line descriptions in the code, and
-   `llms.md` is plain Markdown, which no directive can fill. Instead
-   `tests/test_docs.py` checks that each table lists exactly the keys of
-   `CLUSTER_KEYS`/`PROJECT_KEYS`/`CLASS_KEYS`/`SUBMITTER_KEYS` in their order,
-   with the code's defaults, and that the PBS raw keys (`pbs.RAW_KEYS`) and
-   the backends in `schedulers.md` are the installed ones. A SLURM backend
-   adds its raw keys to that test. (`status`/`cancel` are documented in
-   `submitting.md`.) Left: SLURM; how to write a backend (step 2); set up the Read
-   the Docs project. Keep the "Current limitations" section of
-   `docs/submitting.md` in step with what is implemented.
+4. User documentation (`docs/`). Written: tutorial, concepts, configuration
+   reference, submitting (including `status`/`cancel`), schedulers (PBS,
+   local), FAQ. The key tables are hand-written, not generated (their wording
+   is richer than the code's descriptions, and `llms.md` is plain Markdown),
+   and checked by `tests/test_docs.py`. Left: SLURM, the backend guide (step
+   2), setting up the Read the Docs project. Keep the "Current limitations"
+   section of `docs/submitting.md` in step with what is implemented.
 5. Check the success criteria from GOALS.md on a real PBS cluster and a real
    SLURM cluster.
 
@@ -585,7 +169,7 @@ racing a job that just ended still cancels the rest of its batch.
 ### After 1.0 (ordered by expected value)
 
 - Named cluster profiles (`--cluster <name>`, `JUG_HPC_CLUSTER`) for home
-  directories shared between clusters.
+  directories shared between clusters (or choosing a file from the hostname).
 - Smart limits, phases A and B (below): recording task durations and memory
   per class, warning when a typical task is longer than the margin
   `(1 - time_fraction) × time`, and `jug-hpc suggest`.
@@ -614,7 +198,7 @@ Ideas (roughly by expected value):
   between a minimum and a maximum (short jobs backfill better); maybe aim
   just under a queue's limit.
 - `time_fraction = "auto"`: `JUG_MAX_SECONDS = time − p99(task time) ×
-  safety`, instead of a fixed fraction (the GOALS.md open question).
+  safety`, instead of a fixed fraction.
 - CPU efficiency: `cput / (walltime × ncpus)` per class; warn (or lower
   `cpus`) when tasks use far fewer CPUs than requested. Never raise it
   automatically (tasks must thread themselves).
@@ -628,8 +212,8 @@ Ideas (roughly by expected value):
   predicted time until they are (from the dependency indices in
   `jugstate`) is about the queue wait.
 - Cancel queued workers no longer needed (ready tasks fell below queued
-  workers); needs no measurement, and cancelling from the poll already exists
-  (milestone 4 step 7, `PollResult.cancelled`).
+  workers); needs no measurement, and the poll can already cancel
+  (`PollResult.cancelled`).
 - Tail: when few tasks are left, submit workers with `time` for one or two
   tasks. (No speculative execution: Jug's locks forbid running a task twice.)
 - Stats across runs, per task name, in `.jug_hpc/`, so a rerun after
@@ -688,9 +272,9 @@ Phase A, record:
   no locking): a `start` line (hash, name, time, RSS) *before* each task, an
   `end` line (duration, peak) after it. The last unmatched `start` of a
   killed worker is the task that was running: the culprit of an OOM kill,
-  and the lock it left behind. This ties locks to jobs, which milestone 4
-  step 5 could not (Jug lock files hold no job ID), so stale locks could be
-  found per dead job, not only per class without workers.
+  and the lock it left behind. This ties locks (and failures) to jobs, so
+  stale locks could be found per dead job, not only per class without
+  workers.
 - Per-task memory peak: `ru_maxrss` only grows; on Linux, writing `5` to
   `/proc/self/clear_refs` before each task resets `VmHWM`. The cgroup peak
   (what the scheduler enforces) from the per-worker usage stays the
@@ -712,11 +296,11 @@ Phase C, act:
   the values used and each change is logged with its reason.
 - Hysteresis: round to steps (memory ~1.25×, time 15 min) and change only
   when the estimate moves past a threshold, so scripts and logs stay stable.
-- Record each job's requested spec in `jobs.json`: `kills.suggestion`
-  compares against the class as configured *now*, which is wrong once sizes
-  change by themselves.
-- Retry after a kill needs the killed task's lock released. Milestone 4
-  step 5 only releases by hand (`status --release-stale`), as the submitter
+- `jobs.json` already records each job's resources (`state.JobResources`),
+  but `kills.suggestion` (in the submitter's log) compares against the class
+  as configured *now*, which is wrong once sizes change by themselves.
+- Retry after a kill needs the killed task's lock released. Stale locks are
+  released only by hand now (`status --release-stale`), as the submitter
   can't tell a dead worker's lock from a `jug execute` outside jug-hpc; the
   per-task log names the exact lock a killed job held, so the submitter
   could release just that one (`jugstate.release_locks`). With
@@ -731,22 +315,10 @@ Phase C, act:
   backend reporting rusage; `fake_pbs/qstat` writing `resources_used`
   (format as in `tests/pbs_output/pbspro-2026.1/`).
 
-## Answers to the open questions in GOALS.md
-
-| Question | Answer in this plan |
-|---|---|
-| Submission strategy | Polling submitter (milestone 3); scheduler dependencies after 1.0 |
-| Classes for tasks after `barrier()` | Classes are name patterns, and the submitter reloads the jugfile on each poll, so new tasks are classified when they appear; covered by a test in milestone 3 |
-| Resources by input size | Out of scope for 1.0. Users can split such tasks into two `TaskGenerator`s with different names; documented in the FAQ |
-| Shared home directories | Named profiles, after 1.0 |
-| Learning task durations | After 1.0: record and warn first, then suggest, then (opt-in) adapt; see "Smart limits" |
-| Per-task measurements; rerunning one task | Preferably a Jug option (`jug execute --task-log`), with a jug_hpc launcher as fallback for older Jug; selecting tasks by hash is another candidate Jug change; see "Smart limits" |
-
 ## Risks
 
-- **Polling cost on large graphs.** Loading a jugfile with many tasks on every
-  poll may be slow. Measured: about 2 s for 100k tasks; mitigated by backoff
-  (milestone 3).
+- **Polling cost on large graphs.** Measured: about 2 s per poll for 100k
+  tasks; mitigated by backoff (`--max-interval`).
 - **PBS variants.** PBS Pro, OpenPBS and Torque differ in arrays, `qstat`
   output and exit codes. Mitigation: target OpenPBS/PBS Pro only, keep all
   parsing in pure functions with recorded fixtures from each site we test on.

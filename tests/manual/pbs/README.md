@@ -1,7 +1,7 @@
 # Manual test on a real PBS cluster
 
-These are the checks that CI cannot do (PLAN.md: milestone 2, milestone 3
-item 7, and milestone 4). Each step says what to look for. `collect.sh` saves
+These are the checks that CI cannot do, rerun by hand for each release. Each
+step says what to look for. `collect.sh` saves
 qstat output to `recorded/`, which goes back into `tests/pbs_output/`.
 
 Takes two to three hours, plus time waiting in the queue. Every command below

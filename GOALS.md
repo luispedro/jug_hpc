@@ -57,9 +57,8 @@ Configuration is declarative TOML, split into two files:
   classes, project environment, logs. It lives in the project directory.
 
 Neither file can run code or import the jugfile, so principle 1 holds by
-construction. Both can be checked against a schema, and Python 3.11+ reads
-them with the standard library (`tomllib`), which is why jug_hpc requires
-Python 3.11 or later.
+construction. Both can be checked against a schema, and Python reads them
+with the standard library (`tomllib`).
 
 ### Cluster file
 
@@ -185,7 +184,9 @@ Candidate strategies:
 3. **Hybrid**: use (1) when the class graph is a simple chain and fall back
    to (2) otherwise.
 
-This choice shapes the rest of the design and must be made first.
+Chosen: the polling submitter (PLAN.md says why). Tasks that appear after a
+`barrier()` need nothing special: classes are name patterns, and the submitter
+reloads the jugfile on each poll.
 
 ## Requirements
 
@@ -259,25 +260,16 @@ work.
 
 ## Open questions
 
-- Which submission strategy (above)?
-- How should resource classes work for tasks that only appear after a
-  `barrier()`? (Probably fine: classes are name patterns, not lists of tasks.)
 - Is a selector by task name enough, or will users need different resources
-  for tasks of the same function (e.g. based on input size)? If so, there must
-  be some hook into the jugfile, which conflicts with principle 1.
-- Users whose home directory is shared between several clusters need more
-  than one user-level `cluster.toml`. Options: named profiles
-  (`~/.config/jug_hpc/<name>.toml`, chosen with `--cluster <name>` or
-  `JUG_HPC_CLUSTER`), or choosing a file automatically from the hostname.
-- `time_fraction` is a fixed safety margin. Should `jug_hpc` also learn task
-  durations, e.g. by recording how long each class's tasks take, and warn when
-  a class's typical task is longer than the margin `(1 - time_fraction) × time`?
-  (Yes, as the first step towards smart limits, above.)
+  for tasks of the same function (e.g. based on input size)? Anything more
+  than names needs a hook into the jugfile, which conflicts with principle 1.
+  For 1.0, such tasks can be split into two `TaskGenerator`s with different
+  names (documented in the FAQ).
 - Smart limits need the time and memory of each task, which only the worker
   sees. Should that be an option of `jug execute` (a change in Jug) or a
   wrapper of jug_hpc's around it? And rerunning only the task that was killed
   in a bigger worker needs `jug execute` to select tasks by hash, not only by
-  name.
+  name. (PLAN.md, "Smart limits", prefers the Jug option.)
 
 ## Non-goals
 
