@@ -26,7 +26,7 @@ cd -- "$KIT" || exit 1
 result_paths() {
     local p
     for p in recorded run.log pbs-results.tgz [0-9]*/jugfile.jugdata [0-9]*/.jug_hpc \
-             [0-9]*/logs [0-9]*/*.log [0-9]*/*.txt 5-exit-status/jhpc-* 7-kills/jug_hpc.toml; do
+             [0-9]*/logs [0-9]*/*.log [0-9]*/*.txt 5-exit-status/jhpc-* 7-kills/jug_hpc.toml 9-child-oom/jug_hpc.toml; do
         [ -e "$p" ] && echo "$p"
     done
 }
@@ -46,7 +46,7 @@ if [ -z "${STEPS:-}" ] && [ -n "$(result_paths)" ]; then
     rm -rf -- $(result_paths)
     echo "moved the results of an earlier run into $old"
 fi
-STEPS=${STEPS:-1 2 3 4 5 6 7 8}
+STEPS=${STEPS:-1 2 3 4 5 6 7 8 9}
 mkdir -p recorded
 exec > >(tee -a run.log) 2>&1
 
@@ -370,6 +370,48 @@ step8() (
         grep -q 'no task can run: failed tasks' submit.log
     want 'submit cancels the workers still queued or running' \
         grep -q 'cancelled job' submit.log
+    exit "$bad"
+)
+
+# --- 9. a process a task ran killed for memory; --cleanup-failed ------------------
+step9() (
+    cd 9-child-oom || exit 1
+    bad=0
+    cp too-small.toml jug_hpc.toml
+    jug-hpc check >check.txt 2>&1
+    timeout "$WAIT" jug-hpc submit --interval=20 --max-interval=20 2>&1 | tee submit.log
+    st=${PIPESTATUS[0]}
+    echo "exit status: $st" >>submit.log
+    # shellcheck disable=SC2046
+    W F $(job_ids)
+    jug-hpc status >status-blocked.txt 2>&1
+    cat status-blocked.txt
+    # shellcheck disable=SC2046
+    collect child-oom $(job_ids)
+    # what the site's cgroup hook says, if anything (not checked: site-specific)
+    grep -r -i -e oom -e 'memory limit' logs/scheduler/ || echo 'logs/scheduler/: nothing about memory'
+    # the fix the warning suggests, then run the failed task again
+    cp fixed.toml jug_hpc.toml
+    timeout "$WAIT" jug-hpc submit --cleanup-failed --interval=30 >submit2.log 2>&1
+    st2=$?
+    echo "exit status: $st2" >>submit2.log
+    cat submit2.log
+    # shellcheck disable=SC2046
+    W F $(job_ids)
+    jug-hpc status >status.txt 2>&1
+    cat status.txt
+    want 'submit stops with status 1, the task having failed' \
+        sh -c "[ $st = 1 ] && grep -q 'no task can run: failed tasks' submit.log"
+    want 'status reports the job of [class.child] as killed for memory' \
+        grep -q '\[class.child\]: 1 job killed for memory' status-blocked.txt
+    want 'status says a process the task ran was killed with SIGKILL, raise memory' \
+        grep -q 'a process it ran was killed with SIGKILL.*raise memory' status-blocked.txt
+    want 'with fixed.toml, submit --cleanup-failed cleans up the failed task' \
+        grep -q 'cleaned up 1 failed task' submit2.log
+    want 'with fixed.toml, submit --cleanup-failed finishes every task' \
+        sh -c "[ $st2 = 0 ] && grep -q 'every task is finished' submit2.log"
+    want 'status after the fix leaves out the outdated kill' \
+        sh -c "! grep -q 'killed for memory' status.txt"
     exit "$bad"
 )
 

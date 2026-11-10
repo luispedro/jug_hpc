@@ -10,7 +10,7 @@ first.
 
 ## All at once: `run-everything.sh`
 
-Runs steps 0 to 8 one after the other, unattended, keeping every result in
+Runs steps 0 to 9 one after the other, unattended, keeping every result in
 this directory. On a login node, from this directory inside an up-to-date
 jug_hpc checkout, in `tmux`/`screen` (or with `nohup`):
 
@@ -29,7 +29,7 @@ RPID=<project> PYTHON=python3.12 ./run-everything.sh
   in step 0) and edit it.
 - Its output goes to `run.log`; `recorded/summary.txt` says which steps
   passed, and `run.log` has an `ok:`/`NOT AS EXPECTED:` line for each thing
-  checked in steps 3 to 8. For steps 4 and 8, "OK" means the submitter
+  checked in steps 3 to 9. For steps 4 and 8, "OK" means the submitter
   stopped as it should.
 - Each wait for jobs (queueing included) is capped at `WAIT` seconds (default
   4 hours).
@@ -262,13 +262,47 @@ Look for: `submit` ends with `no task can run: failed tasks`, exit status 1,
 after `default: cancelled job ... no task can run`; the jobs end deleted
 (`recorded/blocked-t.json`).
 
+## 9. A process a task ran, killed for memory; `--cleanup-failed`
+
+`9-child-oom` has a `child` task that runs a Python subprocess growing to 4 GB
+(64 MB every 2 s), and a `final` task (default class) that needs it. With
+`too-small.toml`, `child` gets 1 GB: the cgroup's OOM killer kills the
+subprocess, not Jug, so the task fails, Jug exits 1 and PBS records
+`Exit_status 1` with memory use at the limit, which jug_hpc reports as killed
+for memory.
+
+```bash
+cd 9-child-oom
+cp too-small.toml jug_hpc.toml
+jug-hpc submit --interval=20 --max-interval=20 2>&1 | tee submit.log; echo "exit status: $?" >> submit.log
+# once the job has ended:
+jug-hpc status > status-blocked.txt 2>&1
+../collect.sh child-oom $(python -c "import json; print(*(j['job_id'] for j in json.load(open('.jug_hpc/jobs.json'))['jobs']))")
+cp fixed.toml jug_hpc.toml
+jug-hpc submit --cleanup-failed --interval=30 > submit2.log 2>&1; echo "exit status: $?" >> submit2.log
+jug-hpc status > status.txt 2>&1
+cd ..
+```
+
+Look for: `submit` ends with `no task can run: failed tasks`, exit status 1.
+`status-blocked.txt`: `[class.child]: 1 job killed for memory`, and the
+failure note with `died with <Signals.SIGKILL: 9>` and `a process it ran was
+killed with SIGKILL ... raise memory`. `submit2.log`: `cleaned up 1 failed
+task`, then `every task is finished`, exit status 0. `status.txt`: no kill
+reported (the job's resources differ from the class's now). If the kill is
+not reported, the job's `resources_used.mem` in `recorded/child-oom-t.json`
+was below 90% of its `mem` (sampled memory use missed the peak); the PBS
+error file in `logs/scheduler/` may still say `Killed because of memory
+limit`.
+
 ## Sending back the results
 
 `run-everything.sh` leaves them in `pbs-results.tgz`. By hand:
 
 ```bash
 tar czf pbs-results.tgz recorded run.log 1-static/*.txt \
-    */*.log */*.txt */logs */.jug_hpc 5-exit-status/jhpc-* 7-kills/jug_hpc.toml
+    */*.log */*.txt */logs */.jug_hpc 5-exit-status/jhpc-* 7-kills/jug_hpc.toml \
+    9-child-oom/jug_hpc.toml
 ```
 
 Also note anything odd: error messages, jobs rejected by `qsub`, or a step that

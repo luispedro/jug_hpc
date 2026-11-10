@@ -1,0 +1,12 @@
+# Copied to jug_hpc.toml by run-everything.sh (step 9), first.
+setup = "source ../venv/bin/activate"
+
+[default]
+memory  = "1G"
+time    = "00:10:00"
+workers = 1
+
+# child() runs a process that grows to 4 GB
+[class.child]
+match  = "child"
+memory = "1G"

@@ -135,8 +135,10 @@ Open:
 - Not done: reading the scheduler's error file (e.g. PBS `.ER`, where the
   cgroup hook writes `Killed because of memory limit`); it is backend- and
   site-specific.
-- To do: a step in `tests/manual/pbs/` with a task whose subprocess goes over
-  its memory, to record that `qstat` output at the next release check.
+- Not yet run on a real cluster: step 9 of `tests/manual/pbs/` (a task's
+  subprocess killed for memory, then `submit --cleanup-failed`). At the next
+  release check, save its `qstat` output (`recorded/child-oom-t.json`) in
+  `tests/pbs_output/pbspro-2026.1/`.
 
 ### Milestone 5: second scheduler and 1.0
 

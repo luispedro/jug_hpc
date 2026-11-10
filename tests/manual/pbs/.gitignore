@@ -11,3 +11,4 @@ old-results-*.tgz
 */*.txt
 5-exit-status/jhpc-*
 7-kills/jug_hpc.toml
+9-child-oom/jug_hpc.toml
